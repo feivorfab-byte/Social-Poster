@@ -115,10 +115,22 @@ def generate_captions():
     qa_pairs = data.get('qa_pairs', [])
     interview_text = "\n".join([f"Q: {item['question']}\nA: {item['answer']}" for item in qa_pairs])
     
+    # REVERTED TO STRICT SCHEMA to prevent decoding errors
     prompt = f"""
-    Write 3 Instagram captions (Storytelling, Expert, Hybrid) based on this:
+    Based on the following artist interview about a new piece, write 3 distinct Instagram captions.
+    
+    INTERVIEW TRANSCRIPT:
     {interview_text}
-    Output JSON.
+    
+    Tone: Professional but accessible expert.
+    
+    Output exactly this JSON structure:
+    {{
+        "storytelling": "A narrative caption focusing on the personal journey...",
+        "expert": "A technical caption focusing on materials and method...",
+        "hybrid": "A balanced mix of story and technique...",
+        "hashtags": "#tag1 #tag2 #tag3..."
+    }}
     """
     
     try:
