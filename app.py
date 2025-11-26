@@ -47,6 +47,7 @@ def analyze_image():
         return jsonify({"description": response.text})
 
     except Exception as e:
+        print(f"!!!!!!!!!!!!!! API ERROR: {e}")
         return jsonify({"error": str(e)}), 500
 
 # --- Endpoint 2: Generate Studio Image (Nano Banana/Gemini 3) ---
