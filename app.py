@@ -8,10 +8,13 @@ from google.genai import types
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-# We use 1.5 Pro for analysis because it excels at Vision-to-Text understanding.
-ANALYSIS_MODEL = 'gemini-1.5-pro'
+# OLD (Causing Error):
+# ANALYSIS_MODEL = 'gemini-1.5-pro'
 
-# We use Gemini 3 Pro (Nano Banana) for generation because it is the SOTA image generator.
+# NEW (The Fix):
+ANALYSIS_MODEL = 'gemini-2.5-flash'
+
+# Keep this the same for now, or use 'gemini-3-pro-image-preview'
 IMAGE_GEN_MODEL = 'gemini-3-pro-image-preview'
 
 # Initialize the Google GenAI Client
