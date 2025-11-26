@@ -7,26 +7,19 @@ from google.genai import types
 
 app = Flask(__name__)
 
-# --- CONFIGURATION ---
-# OLD (Causing Error):
-# ANALYSIS_MODEL = 'gemini-1.5-pro'
+# --- CONFIGURATION (Based on your API List) ---
+# Gemini 3 Pro: The best reasoning model for analysis
+ANALYSIS_MODEL = 'gemini-3-pro-preview'
 
-# NEW (The Fix):
-ANALYSIS_MODEL = 'gemini-2.5-flash'
-
-# Keep this the same for now, or use 'gemini-3-pro-image-preview'
+# Nano Banana Pro: The Gemini 3 Image Generation Model
 IMAGE_GEN_MODEL = 'gemini-3-pro-image-preview'
 
-# Initialize the Google GenAI Client
 api_key = os.environ.get("GOOGLE_API_KEY")
-if not api_key:
-    print("Warning: GOOGLE_API_KEY not found in environment variables.")
-
 client = genai.Client(api_key=api_key)
 
 @app.route('/')
 def home():
-    return f"Social Poster Backend Active. Analysis: {ANALYSIS_MODEL} | Gen: {IMAGE_GEN_MODEL}"
+    return f"Backend Active. Analysis: {ANALYSIS_MODEL} | Gen: {IMAGE_GEN_MODEL}"
 
 # --- Endpoint 1: Analyze Image (Vision) ---
 @app.route('/analyze-image', methods=['POST'])
@@ -40,6 +33,7 @@ def analyze_image():
     try:
         image_bytes = file.read()
         
+        # Using Gemini 3 Pro for vision analysis
         response = client.models.generate_content(
             model=ANALYSIS_MODEL,
             contents=[
@@ -50,10 +44,10 @@ def analyze_image():
         return jsonify({"description": response.text})
 
     except Exception as e:
-        print(f"!!!!!!!!!!!!!! API ERROR: {e}")
+        print(f"!!!!!!!!!!!!!! ANALYSIS ERROR: {e}")
         return jsonify({"error": str(e)}), 500
 
-# --- Endpoint 2: Generate Studio Image (Nano Banana/Gemini 3) ---
+# --- Endpoint 2: Generate Studio Image (Nano Banana Pro) ---
 @app.route('/generate-studio-image', methods=['POST'])
 def generate_studio_image():
     if 'image' not in request.files:
@@ -64,7 +58,9 @@ def generate_studio_image():
     
     try:
         image_bytes = file.read()
-
+        
+        # Nano Banana Pro uses 'generate_content' (not generate_images)
+        # We MUST request both TEXT and IMAGE modalities.
         response = client.models.generate_content(
             model=IMAGE_GEN_MODEL,
             contents=[
@@ -78,6 +74,7 @@ def generate_studio_image():
 
         generated_image_b64 = None
         
+        # Extract the image from the response parts
         if response.candidates and response.candidates[0].content.parts:
             for part in response.candidates[0].content.parts:
                 if part.inline_data:
@@ -90,9 +87,11 @@ def generate_studio_image():
                 "image_base64": generated_image_b64
             })
         else:
+            print("API returned text but no image.")
             return jsonify({"error": "Model returned text but no image."}), 500
 
     except Exception as e:
+        print(f"!!!!!!!!!!!!!! IMAGE GEN ERROR: {e}")
         return jsonify({"error": str(e)}), 500
 
 # --- Endpoint 3: Generate Interview Questions ---
@@ -102,15 +101,9 @@ def generate_interview_questions():
         return jsonify({"error": "No image"}), 400
     file = request.files['image']
     
-    # Prompt to get a JSON array back
     prompt = """
-    Analyze this artwork/sculpture. Generate 3 distinct, engaging interview questions that I (the artist) can answer to tell the story of this piece. 
-    1. One specific question about the technique/materials.
-    2. One conceptual question about the inspiration.
-    3. One question about the challenges faced.
-    
-    Return ONLY a raw JSON array of strings, like this: 
-    ["Question 1", "Question 2", "Question 3"]
+    Analyze this artwork. Generate 3 distinct, engaging interview questions...
+    Return ONLY a raw JSON array of strings: ["Q1", "Q2", "Q3"]
     """
     
     try:
@@ -120,39 +113,23 @@ def generate_interview_questions():
             contents=[types.Part.from_bytes(data=image_bytes, mime_type=file.content_type), prompt],
             config=types.GenerateContentConfig(response_mime_type="application/json")
         )
-        
-        # Parse the JSON string from Gemini into a real Python list
         questions = json.loads(response.text)
         return jsonify({"questions": questions})
-        
     except Exception as e:
+        print(f"!!!!!!!!!!!!!! QUESTIONS ERROR: {e}")
         return jsonify({"error": str(e)}), 500
 
 # --- Endpoint 4: Generate Captions ---
 @app.route('/generate-captions', methods=['POST'])
 def generate_captions():
-    # Expecting JSON data: {"qa_pairs": [{"question": "...", "answer": "..."}, ...]}
     data = request.json
     qa_pairs = data.get('qa_pairs', [])
-    
-    # Format the transcript for the AI
     interview_text = "\n".join([f"Q: {item['question']}\nA: {item['answer']}" for item in qa_pairs])
     
     prompt = f"""
-    Based on the following artist interview about a new piece, write 3 distinct Instagram captions.
-    
-    INTERVIEW TRANSCRIPT:
+    Write 3 Instagram captions (Storytelling, Expert, Hybrid) based on this:
     {interview_text}
-    
-    Tone: Professional but accessible expert.
-    
-    Output exactly this JSON structure:
-    {{
-        "storytelling": "A narrative caption focusing on the personal journey...",
-        "expert": "A technical caption focusing on materials and method...",
-        "hybrid": "A balanced mix of story and technique...",
-        "hashtags": "#tag1 #tag2 #tag3..."
-    }}
+    Output JSON.
     """
     
     try:
@@ -161,11 +138,10 @@ def generate_captions():
             contents=[prompt],
             config=types.GenerateContentConfig(response_mime_type="application/json")
         )
-        
         captions = json.loads(response.text)
         return jsonify(captions)
-        
     except Exception as e:
+        print(f"!!!!!!!!!!!!!! CAPTIONS ERROR: {e}")
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
