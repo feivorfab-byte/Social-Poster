@@ -73,26 +73,18 @@ def generate_studio_image():
         print(f"!!!!!!!!!!!!!! IMAGE GEN ERROR: {e}")
         return jsonify({"error": str(e)}), 500
 
-# --- Endpoint 3: Generate Interview Questions (UPDATED) ---
+# --- Endpoint 3: Generate Interview Questions ---
 @app.route('/generate-interview-questions', methods=['POST'])
 def generate_interview_questions():
     if 'image' not in request.files:
         return jsonify({"error": "No image"}), 400
     file = request.files['image']
     
-    # 1. Look for a prompt from the app.
-    # 2. If none, use a SIMPLE default prompt.
     user_prompt = request.form.get('prompt')
-    
     default_prompt = """
-    Analyze this artwork. Generate 3 short, fun, and casual interview questions that I (the artist) can answer quickly for social media.
-    1. One simple question about materials or process.
-    2. One fun question about the idea/vibe.
-    3. One easy question about what I love about it.
-    Keep the tone light, friendly, and easy. No complex art jargon.
-    Return ONLY a raw JSON array of strings: ["Q1", "Q2", "Q3"]
+    Analyze this artwork. Generate 3 distinct, engaging interview questions...
+    Return raw JSON: [{"id": 1, "category": "...", "text": "..."}]
     """
-    
     final_prompt = user_prompt if user_prompt else default_prompt
     
     try:
@@ -102,34 +94,50 @@ def generate_interview_questions():
             contents=[types.Part.from_bytes(data=image_bytes, mime_type=file.content_type), final_prompt],
             config=types.GenerateContentConfig(response_mime_type="application/json")
         )
-        questions = json.loads(response.text)
-        return jsonify({"questions": questions})
+        
+        # Handle response wrapping
+        try:
+            # First try to parse as pure list
+            questions = json.loads(response.text)
+            if isinstance(questions, dict) and 'questions' in questions:
+                questions = questions['questions']
+            
+            # Ensure it's a list for the app
+            return jsonify({"questions": questions})
+        except:
+            return jsonify({"questions": []}) # Fallback
+            
     except Exception as e:
         print(f"!!!!!!!!!!!!!! QUESTIONS ERROR: {e}")
         return jsonify({"error": str(e)}), 500
 
-# --- Endpoint 4: Generate Captions ---
+# --- Endpoint 4: Generate Captions (UPDATED) ---
 @app.route('/generate-captions', methods=['POST'])
 def generate_captions():
     data = request.json
     qa_pairs = data.get('qa_pairs', [])
+    tone = data.get('tone', 'balanced')   # Read Tone
+    length = data.get('length', 'medium') # Read Length
+    
     interview_text = "\n".join([f"Q: {item['question']}\nA: {item['answer']}" for item in qa_pairs])
     
-    # REVERTED TO STRICT SCHEMA to prevent decoding errors
+    # Updated Prompt with Tone/Length instructions
     prompt = f"""
-    Based on the following artist interview about a new piece, write 3 distinct Instagram captions.
+    Based on this artist interview, write 3 distinct Instagram captions.
     
     INTERVIEW TRANSCRIPT:
     {interview_text}
     
-    Tone: Professional but accessible expert.
+    CONFIGURATION:
+    - Tone: {tone} (Adjust the voice accordingly)
+    - Length: {length} (Adjust word count)
     
     Output exactly this JSON structure:
     {{
-        "storytelling": "A narrative caption focusing on the personal journey...",
-        "expert": "A technical caption focusing on materials and method...",
-        "hybrid": "A balanced mix of story and technique...",
-        "hashtags": "#tag1 #tag2 #tag3..."
+        "storytelling": "Narrative caption...",
+        "expert": "Technical/Process caption...",
+        "hybrid": "Mixed caption...",
+        "hashtags": "#tag1 #tag2..."
     }}
     """
     
