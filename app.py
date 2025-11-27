@@ -102,25 +102,48 @@ def generate_interview_questions():
         return jsonify({"error": "No image"}), 400
     file = request.files['image']
     
-    user_prompt = request.form.get('prompt')
-    default_prompt = "Generate 3 interview questions."
-    final_prompt = user_prompt if user_prompt else default_prompt
+    # We enforce a new "Fabricator" prompt here, overriding the client if necessary
+    # to ensure questions are short, casual, and about the BUILD (not design).
+    fabricator_prompt = """
+    Analyze this image. You are interviewing the FABRICATOR (builder/maker), NOT the designer.
+    Generate 3 short, casual, and direct interview questions.
+    
+    Constraints:
+    - Questions must be SHORT (max 15 words).
+    - Tone: Casual, specific, technical but friendly (like two makers talking in a shop).
+    - Focus ONLY on: Materials, Techniques, Assembly, Finishes, or Fabrication Challenges.
+    - Do NOT ask about: Inspiration, Meaning, Design Concept, or "Why".
+    
+    Output exactly this JSON structure (List of Objects):
+    [
+        {"id": 1, "category": "Technique", "text": "(Question about a specific joinery, weld, or method seen in the image)"},
+        {"id": 2, "category": "Materials", "text": "(Question about the specific wood/metal/material choice)"},
+        {"id": 3, "category": "The Build", "text": "(Question about the trickiest part of putting it together)"}
+    ]
+    """
     
     try:
         image_bytes = file.read()
         response = client.models.generate_content(
             model=ANALYSIS_MODEL,
-            contents=[types.Part.from_bytes(data=image_bytes, mime_type=file.content_type), final_prompt],
+            contents=[types.Part.from_bytes(data=image_bytes, mime_type=file.content_type), fabricator_prompt],
             config=types.GenerateContentConfig(response_mime_type="application/json")
         )
         
         try:
             questions = json.loads(response.text)
+            # Handle case where AI wraps it in a dict key we didn't ask for
             if isinstance(questions, dict) and 'questions' in questions:
                 questions = questions['questions']
             return jsonify({"questions": questions})
         except:
-            return jsonify({"questions": []})
+            # Fallback questions if JSON fails
+            fallback = [
+                {"id": 1, "category": "Process", "text": "What was the hardest part of this build?"},
+                {"id": 2, "category": "Materials", "text": "What materials did you use here?"},
+                {"id": 3, "category": "Finish", "text": "How did you get that finish?"}
+            ]
+            return jsonify({"questions": fallback})
             
     except Exception as e:
         print(f"!!!!!!!!!!!!!! QUESTIONS ERROR: {e}")
