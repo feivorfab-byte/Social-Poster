@@ -1,6 +1,7 @@
 import os
 import base64
 import json
+import re
 from flask import Flask, request, jsonify
 from google import genai
 from google.genai import types
@@ -8,25 +9,45 @@ from google.genai import types
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
+# Gemini 2.5 Pro: Excellent for describing images and writing text
 ANALYSIS_MODEL = 'gemini-2.5-pro'
+
+# Gemini 3 Pro Image: The ONLY model that can "see" an input image and edit/regenerate it
+# This fixes the "weird new object" issue by modifying your actual photo instead of drawing from scratch.
 IMAGE_GEN_MODEL = 'gemini-3-pro-image-preview'
 
 api_key = os.environ.get("GOOGLE_API_KEY")
 client = genai.Client(api_key=api_key)
+
+# Helper to strip Markdown formatting from JSON responses
+def clean_json_text(text):
+    if not text: return "{}"
+    text = text.strip()
+    # Remove markdown code blocks if present
+    if text.startswith("```json"):
+        text = text[7:]
+    if text.startswith("```"):
+        text = text[3:]
+    if text.endswith("```"):
+        text = text[:-3]
+    return text.strip()
 
 @app.route('/')
 def home():
     return f"Backend Active. Analysis: {ANALYSIS_MODEL} | Gen: {IMAGE_GEN_MODEL}"
 
 # ==========================================
-# EXISTING ENDPOINTS (Finished Project Flow)
+# 1. FINISHED PROJECT ENDPOINTS
 # ==========================================
 
 @app.route('/analyze-image', methods=['POST'])
 def analyze_image():
-    if 'image' not in request.files: return jsonify({"error": "No image"}), 400
+    if 'image' not in request.files:
+        return jsonify({"error": "No image file provided"}), 400
+    
     file = request.files['image']
-    prompt = request.form.get('prompt', 'Describe this.')
+    prompt = request.form.get('prompt', 'Describe this image in detail.')
+    
     try:
         image_bytes = file.read()
         response = client.models.generate_content(
@@ -35,61 +56,131 @@ def analyze_image():
         )
         return jsonify({"description": response.text})
     except Exception as e:
+        print(f"!!!!!!!!!!!!!! ANALYSIS ERROR: {e}")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/generate-studio-image', methods=['POST'])
 def generate_studio_image():
-    if 'image' not in request.files: return jsonify({"error": "No image"}), 400
+    if 'image' not in request.files:
+        return jsonify({"error": "No reference image provided"}), 400
+        
     file = request.files['image']
-    prompt = request.form.get('prompt', 'Studio photo.')
+    # The prompt comes from your Swift app (includes the description + background request)
+    prompt = request.form.get('prompt', 'Turn this into a studio photograph.')
+    
     try:
         image_bytes = file.read()
+        print(f"--- Generating with Image Input. Prompt snippet: {prompt[:50]}... ---")
+
+        # We use 'generate_content' because we are passing an input image (multimodal)
+        # This allows the AI to "see" your product and preserve it
         response = client.models.generate_content(
             model=IMAGE_GEN_MODEL,
-            contents=[types.Part.from_bytes(data=image_bytes, mime_type=file.content_type), prompt],
-            config=types.GenerateContentConfig(response_modalities=["TEXT", "IMAGE"])
+            contents=[
+                # 1. The Image
+                types.Part.from_bytes(data=image_bytes, mime_type=file.content_type),
+                # 2. The Instructions
+                prompt
+            ],
+            config=types.GenerateContentConfig(
+                response_modalities=["TEXT", "IMAGE"],
+            )
         )
+
         generated_image_b64 = None
+        
+        # Extract the image from the response parts
         if response.candidates and response.candidates[0].content.parts:
             for part in response.candidates[0].content.parts:
                 if part.inline_data:
                     generated_image_b64 = base64.b64encode(part.inline_data.data).decode('utf-8')
                     break
+        
         if generated_image_b64:
-            return jsonify({"message": "Success", "image_base64": generated_image_b64})
-        return jsonify({"error": "No image returned"}), 500
+            return jsonify({
+                "message": "Image generated successfully",
+                "image_base64": generated_image_b64
+            })
+        else:
+            # Sometimes the model refuses and just returns text explaining why
+            print(f"API returned text but no image: {response.text}")
+            return jsonify({"error": "Model returned text but no image (Safety or Instruction issue)."}), 500
+
     except Exception as e:
+        print(f"!!!!!!!!!!!!!! IMAGE GEN ERROR: {e}")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/generate-interview-questions', methods=['POST'])
 def generate_interview_questions():
-    if 'image' not in request.files: return jsonify({"error": "No image"}), 400
+    if 'image' not in request.files:
+        return jsonify({"error": "No image"}), 400
     file = request.files['image']
-    user_prompt = request.form.get('prompt', 'Generate questions.')
+    
+    user_prompt = request.form.get('prompt')
+    default_prompt = "Generate 3 interview questions."
+    final_prompt = user_prompt if user_prompt else default_prompt
+    
     try:
         image_bytes = file.read()
         response = client.models.generate_content(
             model=ANALYSIS_MODEL,
-            contents=[types.Part.from_bytes(data=image_bytes, mime_type=file.content_type), user_prompt],
+            contents=[types.Part.from_bytes(data=image_bytes, mime_type=file.content_type), final_prompt],
             config=types.GenerateContentConfig(response_mime_type="application/json")
         )
-        questions = json.loads(response.text)
-        if isinstance(questions, dict) and 'questions' in questions: questions = questions['questions']
+        
+        text = clean_json_text(response.text)
+        questions = json.loads(text)
+        
+        # Handle if AI wraps it in a dict key we didn't ask for
+        if isinstance(questions, dict) and 'questions' in questions:
+            questions = questions['questions']
+            
         return jsonify({"questions": questions})
+            
     except Exception as e:
+        print(f"!!!!!!!!!!!!!! QUESTIONS ERROR: {e}")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/generate-captions', methods=['POST'])
 def generate_captions():
-    data = request.json
-    # ... existing caption logic ...
-    # (Simplified for brevity in this view, assuming previous logic handles it)
-    # If you need the full logic here, let me know, but typically standard flow uses specific prompt structure.
-    # For Daily Post we use a NEW specific endpoint below.
-    return jsonify({"error": "Use generate-daily-caption for daily posts"}), 404
+    try:
+        data = request.json
+        qa_pairs = data.get('qa_pairs', [])
+        tone = data.get('tone', 'balanced')
+        length = data.get('length', 'medium')
+        
+        interview_text = "\n".join([f"Q: {item['question']}\nA: {item['answer']}" for item in qa_pairs])
+        
+        prompt = f"""
+        Based on this artist interview, write 3 distinct Instagram captions.
+        INTERVIEW TRANSCRIPT: {interview_text}
+        CONFIGURATION: Tone: {tone}, Length: {length}
+        
+        Output exactly this JSON structure:
+        {{
+            "storytelling": "Narrative caption...",
+            "expert": "Technical/Process caption...",
+            "hybrid": "Mixed caption...",
+            "hashtags": "#tag1 #tag2..."
+        }}
+        """
+        
+        response = client.models.generate_content(
+            model=ANALYSIS_MODEL,
+            contents=[prompt],
+            config=types.GenerateContentConfig(response_mime_type="application/json")
+        )
+        
+        text = clean_json_text(response.text)
+        captions = json.loads(text)
+        return jsonify(captions)
+
+    except Exception as e:
+        print(f"!!!!!!!!!!!!!! CAPTIONS ERROR: {e}")
+        return jsonify({"error": str(e)}), 500
 
 # ==========================================
-# NEW ENDPOINTS (Daily Post Flow)
+# 2. DAILY POST ENDPOINTS
 # ==========================================
 
 @app.route('/analyze-daily-photo', methods=['POST'])
@@ -102,9 +193,7 @@ def analyze_daily_photo():
     prompt = """
     You are a social media manager for an expert fabricator. Look at this work-in-progress photo.
     Generate 3 short, engaging 'writing prompts' or questions that the fabricator could answer to create a cool post.
-    Keep them casual, curious, and specific to what you see in the photo (e.g., specific tools, materials, or sparks).
-    Examples: 'What challenge are you solving here?', 'Why did you choose this material?', 'What is the trickiest part of this weld?'
-    
+    Keep them casual, curious, and specific to what you see in the photo.
     Output ONLY a raw JSON list of strings. Example: ["Prompt 1", "Prompt 2", "Prompt 3"]
     """
     
@@ -115,7 +204,12 @@ def analyze_daily_photo():
             contents=[types.Part.from_bytes(data=image_bytes, mime_type=file.content_type), prompt],
             config=types.GenerateContentConfig(response_mime_type="application/json")
         )
-        prompts = json.loads(response.text)
+        prompts = json.loads(clean_json_text(response.text))
+        
+        # Handle wrapping
+        if isinstance(prompts, dict) and 'prompts' in prompts:
+            prompts = prompts['prompts']
+            
         return jsonify({"prompts": prompts})
     except Exception as e:
         print(f"Daily Analysis Error: {e}")
@@ -156,7 +250,7 @@ def generate_daily_caption():
             contents=[types.Part.from_bytes(data=image_bytes, mime_type=file.content_type), prompt],
             config=types.GenerateContentConfig(response_mime_type="application/json")
         )
-        result = json.loads(response.text)
+        result = json.loads(clean_json_text(response.text))
         return jsonify(result)
     except Exception as e:
         print(f"Daily Caption Error: {e}")
