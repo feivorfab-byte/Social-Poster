@@ -68,7 +68,7 @@ def generate_studio_image():
     
     try:
         image_bytes = file.read()
-        print(f"--- Generating image. Prompt snippet: {prompt[:100]}... ---")
+        print(f"--- Generating 2K image. Prompt snippet: {prompt[:100]}... ---")
 
         response = client.models.generate_content(
             model=IMAGE_GEN_MODEL,
@@ -77,7 +77,11 @@ def generate_studio_image():
                 prompt
             ],
             config=types.GenerateContentConfig(
-                response_modalities=["TEXT", "IMAGE"]
+                response_modalities=["TEXT", "IMAGE"],
+                image_config=types.ImageConfig(
+                    aspect_ratio="1:1",
+                    image_size="2K"
+                )
             )
         )
 
@@ -89,7 +93,7 @@ def generate_studio_image():
                 if part.inline_data:
                     # Return the full base64 data without any compression
                     generated_image_b64 = base64.b64encode(part.inline_data.data).decode('utf-8')
-                    print(f"--- Image generated. Size: {len(part.inline_data.data)} bytes ---")
+                    print(f"--- 2K Image generated. Size: {len(part.inline_data.data)} bytes ---")
                     break
         
         if generated_image_b64:
