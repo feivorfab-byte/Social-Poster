@@ -9,8 +9,8 @@ from google.genai import types
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-# Gemini 2.5 Pro: Excellent for describing images and writing text
-ANALYSIS_MODEL = 'gemini-2.5-pro'
+# Gemini 2.5 Flash: Fast for describing images and writing text
+ANALYSIS_MODEL = 'gemini-2.5-flash'
 
 # Gemini 3 Pro Image: The ONLY model that can "see" an input image and edit/regenerate it
 IMAGE_GEN_MODEL = 'gemini-3-pro-image-preview'
