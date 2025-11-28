@@ -65,45 +65,60 @@ def generate_studio_image():
         
     file = request.files['image']
     prompt = request.form.get('prompt', 'Turn this into a studio photograph.')
+    quality = request.form.get('quality', '1K')  # Default to 1K for speed
+    
+    # Validate quality parameter
+    if quality not in ['1K', '2K', '4K']:
+        quality = '1K'
     
     try:
         image_bytes = file.read()
-        print(f"--- Generating 2K image. Prompt snippet: {prompt[:100]}... ---")
+        print(f"--- Generating {quality} image. Prompt snippet: {prompt[:100]}... ---")
 
-        response = client.models.generate_content(
-            model=IMAGE_GEN_MODEL,
-            contents=[
-                types.Part.from_bytes(data=image_bytes, mime_type=file.content_type),
-                prompt
-            ],
-            config=types.GenerateContentConfig(
-                response_modalities=["TEXT", "IMAGE"],
-                image_config=types.ImageConfig(
-                    aspect_ratio="1:1",
-                    image_size="2K"
+        # Retry logic - try up to 3 times
+        max_retries = 3
+        last_error = None
+        
+        for attempt in range(max_retries):
+            try:
+                response = client.models.generate_content(
+                    model=IMAGE_GEN_MODEL,
+                    contents=[
+                        types.Part.from_bytes(data=image_bytes, mime_type=file.content_type),
+                        prompt
+                    ],
+                    config=types.GenerateContentConfig(
+                        response_modalities=["TEXT", "IMAGE"],
+                        image_config=types.ImageConfig(
+                            aspect_ratio="1:1",
+                            image_size=quality
+                        )
+                    )
                 )
-            )
-        )
-
-        generated_image_b64 = None
+                
+                # Extract the image from the response parts
+                if response.candidates and response.candidates[0].content.parts:
+                    for part in response.candidates[0].content.parts:
+                        if part.inline_data:
+                            generated_image_b64 = base64.b64encode(part.inline_data.data).decode('utf-8')
+                            print(f"--- {quality} Image generated on attempt {attempt + 1}. Size: {len(part.inline_data.data)} bytes ---")
+                            return jsonify({
+                                "message": "Image generated successfully",
+                                "image_base64": generated_image_b64
+                            })
+                
+                # No image in response, retry
+                print(f"--- Attempt {attempt + 1}: No image in response, retrying... ---")
+                last_error = "Model returned no image"
+                
+            except Exception as retry_error:
+                print(f"--- Attempt {attempt + 1} failed: {retry_error} ---")
+                last_error = str(retry_error)
+                continue
         
-        # Extract the image from the response parts
-        if response.candidates and response.candidates[0].content.parts:
-            for part in response.candidates[0].content.parts:
-                if part.inline_data:
-                    # Return the full base64 data without any compression
-                    generated_image_b64 = base64.b64encode(part.inline_data.data).decode('utf-8')
-                    print(f"--- 2K Image generated. Size: {len(part.inline_data.data)} bytes ---")
-                    break
-        
-        if generated_image_b64:
-            return jsonify({
-                "message": "Image generated successfully",
-                "image_base64": generated_image_b64
-            })
-        else:
-            print(f"API returned text but no image: {response.text}")
-            return jsonify({"error": "Model returned text but no image (Safety or Instruction issue)."}), 500
+        # All retries failed
+        print(f"!!!!!!!!!!!!!! IMAGE GEN FAILED after {max_retries} attempts: {last_error}")
+        return jsonify({"error": f"Failed after {max_retries} attempts: {last_error}"}), 500
 
     except Exception as e:
         print(f"!!!!!!!!!!!!!! IMAGE GEN ERROR: {e}")
