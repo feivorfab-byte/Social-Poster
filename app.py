@@ -13,7 +13,6 @@ app = Flask(__name__)
 ANALYSIS_MODEL = 'gemini-2.5-pro'
 
 # Gemini 3 Pro Image: The ONLY model that can "see" an input image and edit/regenerate it
-# This fixes the "weird new object" issue by modifying your actual photo instead of drawing from scratch.
 IMAGE_GEN_MODEL = 'gemini-3-pro-image-preview'
 
 api_key = os.environ.get("GOOGLE_API_KEY")
@@ -65,25 +64,26 @@ def generate_studio_image():
         return jsonify({"error": "No reference image provided"}), 400
         
     file = request.files['image']
-    # The prompt comes from your Swift app (includes the description + background request)
     prompt = request.form.get('prompt', 'Turn this into a studio photograph.')
     
     try:
         image_bytes = file.read()
-        print(f"--- Generating with Image Input. Prompt snippet: {prompt[:50]}... ---")
+        print(f"--- Generating 2K image. Prompt snippet: {prompt[:100]}... ---")
 
-        # We use 'generate_content' because we are passing an input image (multimodal)
-        # This allows the AI to "see" your product and preserve it
+        # Use generate_content with 2K resolution settings
         response = client.models.generate_content(
             model=IMAGE_GEN_MODEL,
             contents=[
-                # 1. The Image
                 types.Part.from_bytes(data=image_bytes, mime_type=file.content_type),
-                # 2. The Instructions
                 prompt
             ],
             config=types.GenerateContentConfig(
                 response_modalities=["TEXT", "IMAGE"],
+                # Request 2K resolution output
+                image_config=types.ImageConfig(
+                    aspect_ratio="1:1",
+                    image_size="2K"
+                )
             )
         )
 
@@ -93,7 +93,9 @@ def generate_studio_image():
         if response.candidates and response.candidates[0].content.parts:
             for part in response.candidates[0].content.parts:
                 if part.inline_data:
+                    # Return the full base64 data without any compression
                     generated_image_b64 = base64.b64encode(part.inline_data.data).decode('utf-8')
+                    print(f"--- 2K Image generated. Size: {len(part.inline_data.data)} bytes ---")
                     break
         
         if generated_image_b64:
@@ -102,7 +104,6 @@ def generate_studio_image():
                 "image_base64": generated_image_b64
             })
         else:
-            # Sometimes the model refuses and just returns text explaining why
             print(f"API returned text but no image: {response.text}")
             return jsonify({"error": "Model returned text but no image (Safety or Instruction issue)."}), 500
 
