@@ -13,7 +13,7 @@ app = Flask(__name__)
 ANALYSIS_MODEL = 'gemini-2.5-flash'
 
 # Gemini 3 Pro Image: The ONLY model that can "see" an input image and edit/regenerate it
-IMAGE_GEN_MODEL = 'gemini-3.0-pro-image-preview'
+IMAGE_GEN_MODEL = 'gemini-3-pro-image-preview'
 
 api_key = os.environ.get("GOOGLE_API_KEY")
 client = genai.Client(api_key=api_key)
