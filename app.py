@@ -13,7 +13,7 @@ app = Flask(__name__)
 ANALYSIS_MODEL = 'gemini-2.5-flash'
 
 # Gemini 3 Pro Image: The ONLY model that can "see" an input image and edit/regenerate it
-IMAGE_GEN_MODEL = 'gemini-3-pro-image-preview'
+IMAGE_GEN_MODEL = 'gemini-3.0-pro-image-preview'
 
 api_key = os.environ.get("GOOGLE_API_KEY")
 client = genai.Client(api_key=api_key)
@@ -36,11 +36,12 @@ def home():
     return f"Backend Active. Analysis: {ANALYSIS_MODEL} | Gen: {IMAGE_GEN_MODEL}"
 
 # ==========================================
-# 1. FINISHED PROJECT ENDPOINTS
+# 1. STUDIO IMAGE ENDPOINTS
 # ==========================================
 
 @app.route('/analyze-image', methods=['POST'])
 def analyze_image():
+    """Analyze main reference image to get detailed description."""
     if 'image' not in request.files:
         return jsonify({"error": "No image file provided"}), 400
     
@@ -58,22 +59,92 @@ def analyze_image():
         print(f"!!!!!!!!!!!!!! ANALYSIS ERROR: {e}")
         return jsonify({"error": str(e)}), 500
 
+
+@app.route('/analyze-detail', methods=['POST'])
+def analyze_detail():
+    """Analyze a detail image using Gemini 2.5 Flash and return a concise label."""
+    if 'image' not in request.files:
+        return jsonify({"error": "No image file provided"}), 400
+    
+    file = request.files['image']
+    prompt = request.form.get('prompt', 'Identify the key visual element, texture, or detail shown in this image and describe it in 10 words or less.')
+    
+    try:
+        image_bytes = file.read()
+        
+        # Force clean output with explicit instruction
+        full_prompt = f"{prompt}\n\nIMPORTANT: Output ONLY the descriptive label text. No quotes, no introductory phrases, no punctuation at the end. Just the raw label."
+        
+        response = client.models.generate_content(
+            model=ANALYSIS_MODEL,
+            contents=[types.Part.from_bytes(data=image_bytes, mime_type=file.content_type), full_prompt]
+        )
+        
+        # Clean the response - remove quotes, extra whitespace, trailing punctuation
+        label = response.text.strip().strip('"\'').rstrip('.')
+        
+        return jsonify({"label": label})
+    except Exception as e:
+        print(f"!!!!!!!!!!!!!! DETAIL ANALYSIS ERROR: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/generate-studio-image', methods=['POST'])
 def generate_studio_image():
+    """
+    Generate studio image using Gemini 3 Pro with multi-reference support.
+    
+    Implements best practices from Gemini 3 Pro documentation:
+    - Explicit image labeling in prompts
+    - Main reference first, details in sequence
+    - Preservation language for critical features
+    - Single-source-of-truth master image approach
+    """
     if 'image' not in request.files:
         return jsonify({"error": "No reference image provided"}), 400
         
-    file = request.files['image']
+    main_file = request.files['image']
     prompt = request.form.get('prompt', 'Turn this into a studio photograph.')
-    quality = request.form.get('quality', '1K')  # Default to 1K for speed
+    quality = request.form.get('quality', '1K')
+    
+    # Get detail images (up to 3)
+    detail_images = []
+    detail_labels = []
+    
+    for i in range(1, 4):  # detail1, detail2, detail3
+        detail_key = f'detail{i}'
+        label_key = f'detail{i}_label'
+        
+        if detail_key in request.files:
+            detail_file = request.files[detail_key]
+            detail_bytes = detail_file.read()
+            detail_images.append((detail_bytes, detail_file.content_type))
+            detail_labels.append(request.form.get(label_key, f'Detail {i}'))
     
     # Validate quality parameter
     if quality not in ['1K', '2K', '4K']:
         quality = '1K'
     
     try:
-        image_bytes = file.read()
-        print(f"--- Generating {quality} image. Prompt snippet: {prompt[:100]}... ---")
+        main_image_bytes = main_file.read()
+        print(f"--- Generating {quality} image with {len(detail_images)} detail reference(s) ---")
+        print(f"--- Prompt snippet: {prompt[:150]}... ---")
+
+        # Build content parts with explicit labeling per Gemini 3 Pro best practices
+        # Order: Main reference first (establishes subject), then details for specific areas
+        content_parts = []
+        
+        # Image 1: Main reference (master image - single source of truth)
+        content_parts.append(types.Part.from_bytes(data=main_image_bytes, mime_type=main_file.content_type))
+        
+        # Add detail images in sequence
+        for detail_bytes, detail_mime in detail_images:
+            content_parts.append(types.Part.from_bytes(data=detail_bytes, mime_type=detail_mime))
+        
+        # Build the explicitly labeled prompt
+        # This follows the "explicit labeling" best practice from Gemini 3 Pro docs
+        labeled_prompt = build_labeled_prompt(prompt, detail_labels)
+        content_parts.append(labeled_prompt)
 
         # Retry logic - try up to 3 times
         max_retries = 3
@@ -83,10 +154,7 @@ def generate_studio_image():
             try:
                 response = client.models.generate_content(
                     model=IMAGE_GEN_MODEL,
-                    contents=[
-                        types.Part.from_bytes(data=image_bytes, mime_type=file.content_type),
-                        prompt
-                    ],
+                    contents=content_parts,
                     config=types.GenerateContentConfig(
                         response_modalities=["TEXT", "IMAGE"],
                         image_config=types.ImageConfig(
@@ -123,6 +191,45 @@ def generate_studio_image():
     except Exception as e:
         print(f"!!!!!!!!!!!!!! IMAGE GEN ERROR: {e}")
         return jsonify({"error": str(e)}), 500
+
+
+def build_labeled_prompt(base_prompt, detail_labels):
+    """
+    Build an explicitly labeled prompt following Gemini 3 Pro best practices.
+    
+    Format:
+    - Image 1: Main reference (master product image)
+    - Image 2: [detail label] (detail reference)
+    - Image 3: [detail label] (detail reference)
+    ...
+    
+    [Base prompt with preservation language]
+    """
+    lines = []
+    
+    # Always label Image 1 as the master reference
+    lines.append("- Image 1: Main reference image (master product shot - use this as the authoritative source for the object's shape, proportions, and overall appearance)")
+    
+    # Label detail images
+    for i, label in enumerate(detail_labels, start=2):
+        lines.append(f"- Image {i}: {label} (detail reference - use for rendering this specific area accurately)")
+    
+    # Add the base prompt with preservation emphasis
+    lines.append("")
+    lines.append("INSTRUCTIONS:")
+    lines.append(base_prompt)
+    
+    # Add preservation language per best practices
+    if detail_labels:
+        lines.append("")
+        lines.append("CRITICAL: Preserve the exact object from Image 1. Use the detail reference images to ensure accurate rendering of specific areas, textures, and fine details that may not be fully visible in the main reference.")
+    
+    return "\n".join(lines)
+
+
+# ==========================================
+# 2. FINISHED PROJECT ENDPOINTS
+# ==========================================
 
 @app.route('/generate-interview-questions', methods=['POST'])
 def generate_interview_questions():
@@ -194,7 +301,7 @@ def generate_captions():
         return jsonify({"error": str(e)}), 500
 
 # ==========================================
-# 2. DAILY POST ENDPOINTS
+# 3. DAILY POST ENDPOINTS
 # ==========================================
 
 @app.route('/analyze-daily-photo', methods=['POST'])
