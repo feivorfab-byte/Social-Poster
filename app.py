@@ -599,11 +599,11 @@ def build_stage1_prompt(base_prompt, detail_labels, has_background_image=False, 
     lines = []
     
     lines.append("IMAGE REFERENCES:")
-    lines.append("Image 1: Product reference - recreate this EXACT object with perfect fidelity.")
+    lines.append("Image 1: PRODUCT - Recreate this EXACT object with perfect fidelity. Match every detail.")
     
     next_idx = 2
     if has_background_image:
-        lines.append(f"Image {next_idx}: Background/surface reference - match this EXACT material, texture, color, and pattern.")
+        lines.append(f"Image {next_idx}: BACKGROUND SURFACE - Recreate this EXACT surface with perfect fidelity. Match every detail of the material, color, texture, and pattern.")
         next_idx += 1
     
     for label in detail_labels:
@@ -612,55 +612,44 @@ def build_stage1_prompt(base_prompt, detail_labels, has_background_image=False, 
     
     lines.append("")
     lines.append("=" * 50)
-    lines.append("STAGE 1: PERFECT INTEGRATION")
+    lines.append("TASK: RECREATE BOTH IMAGES INTO ONE PHOTOGRAPH")
     lines.append("=" * 50)
     lines.append("")
-    lines.append("Create a product photograph with PERFECT background integration.")
+    lines.append("Combine Image 1 (product) and Image 2 (surface) into a single studio photograph.")
     lines.append("")
-    
-    # Extract object/camera info from base_prompt
     lines.append(base_prompt)
     lines.append("")
     
     if has_background_image:
-        lines.append("BACKGROUND INTEGRATION - CRITICAL:")
+        lines.append("CRITICAL - EXACT REPRODUCTION OF BOTH:")
         lines.append("")
-        lines.append("STUDIO SETUP: This is a FLAT BACKDROP only - like a photography studio sweep/seamless paper.")
-        lines.append("- ONE single flat surface that serves as the backdrop")
-        lines.append("- DO NOT create a room, corner, or environment with multiple surfaces")
-        lines.append("- DO NOT create both a floor AND a wall - just ONE continuous backdrop surface")
-        lines.append("- Think: product sitting on an infinity cove / seamless backdrop")
+        lines.append("For the PRODUCT (Image 1):")
+        lines.append("- Recreate the EXACT object - same shape, colors, materials, details")
+        lines.append("- This is not inspiration, this is the object to reproduce exactly")
         lines.append("")
-        lines.append("MATERIAL MATCHING from Image 2:")
-        lines.append("- Reproduce the EXACT material, texture, color, and pattern from the reference")
-        lines.append("- Match the precise color tones and grain/pattern direction")
-        lines.append("- Match the material's reflectivity and surface finish")
+        lines.append("For the BACKGROUND (Image 2):")
+        lines.append("- Recreate the EXACT surface - same material, color, texture, pattern")
+        lines.append("- This is not inspiration, this is the surface to reproduce exactly")
+        lines.append("- Use this as a FLAT STUDIO BACKDROP (like seamless paper/infinity cove)")
+        lines.append("- ONE continuous surface only - not a room, not a corner, not multiple surfaces")
         if background_description:
-            lines.append(f"- Material details: {background_description}")
+            lines.append(f"- Surface details: {background_description}")
         lines.append("")
-        lines.append("PLACEMENT:")
-        lines.append("- Product sits naturally on/against the backdrop surface")
+        lines.append("COMPOSITION:")
+        lines.append("- Place the product ON/AGAINST the background surface")
+        lines.append("- The surface fills the entire background of the frame")
         lines.append("- Natural contact shadow where product meets surface")
-        lines.append("- The backdrop material continues behind/around the product seamlessly")
         lines.append("")
     
     lines.append("LIGHTING FOR THIS STAGE:")
-    lines.append("- Soft, diffused, even lighting from above")
+    lines.append("- Soft, diffused, even lighting")
     lines.append("- Minimal harsh shadows")
-    lines.append("- Goal: Clean integration first, dramatic lighting comes in Stage 2")
-    lines.append("")
-    
-    lines.append("INTEGRATION REQUIREMENTS:")
-    lines.append("- Natural contact shadow where product meets surface")
-    lines.append("- Subtle ambient occlusion at contact points")
-    lines.append("- Color interaction between product and surface (subtle reflections)")
-    lines.append("- Product and surface must appear to be in the same physical space")
-    lines.append("- This must look like ONE photograph, not a composite")
+    lines.append("- Clean integration first, dramatic lighting comes in Stage 2")
     lines.append("")
     
     lines.append("PHOTOREALISM:")
     lines.append("- Real photograph, NOT a 3D render")
-    lines.append("- Natural material textures and imperfections")
+    lines.append("- Natural material textures")
     lines.append("- Subtle film grain, natural depth of field")
     
     return "\n".join(lines)
