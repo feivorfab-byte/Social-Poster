@@ -89,6 +89,51 @@ def analyze_detail():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/analyze-background', methods=['POST'])
+def analyze_background():
+    """Analyze a background image and return a short descriptive name."""
+    if 'image' not in request.files:
+        return jsonify({"error": "No image file provided"}), 400
+    
+    file = request.files['image']
+    
+    prompt = """
+    Look at this image and identify what type of background or surface it shows.
+    Generate a SHORT name (2-4 words max) that describes this background.
+    
+    Examples of good names:
+    - "Red Brick Wall"
+    - "Rustic Wood"
+    - "White Marble"
+    - "Concrete Floor"
+    - "Green Velvet"
+    - "Sandy Beach"
+    - "Dark Slate"
+    
+    Output ONLY the short name. No quotes, no explanation, no punctuation.
+    """
+    
+    try:
+        image_bytes = file.read()
+        
+        response = client.models.generate_content(
+            model=ANALYSIS_MODEL,
+            contents=[types.Part.from_bytes(data=image_bytes, mime_type=file.content_type), prompt]
+        )
+        
+        # Clean the response
+        name = response.text.strip().strip('"\'').rstrip('.')
+        # Ensure it's not too long
+        words = name.split()
+        if len(words) > 4:
+            name = ' '.join(words[:4])
+        
+        return jsonify({"name": name})
+    except Exception as e:
+        print(f"!!!!!!!!!!!!!! BACKGROUND ANALYSIS ERROR: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/generate-studio-image', methods=['POST'])
 def generate_studio_image():
     """
