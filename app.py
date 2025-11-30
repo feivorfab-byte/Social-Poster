@@ -403,16 +403,16 @@ def verify_generation(original_bytes, generated_bytes, orientation, visible_text
     
     prompt_template = get_prompt('verification')
     if not prompt_template:
-        # Fallback verification prompt
+        # Fallback verification prompt - no curly braces to avoid format issues
         prompt_template = '''Compare these images. Image 1 is original product, Image 2 is generated.
-Verify: product fidelity, orientation ({orientation}), composition, lighting unity.
-JSON: {{"pass": bool, "issues": []}}'''
+Verify: product fidelity, orientation (ORIENTATION_PLACEHOLDER), composition, lighting unity.
+JSON with pass (boolean) and issues (array of strings).'''
     
-    prompt = prompt_template.format(
-        orientation=orientation,
-        text_check=text_check,
-        text_field=text_field
-    )
+    # Use simple string replacement instead of .format() to avoid JSON brace conflicts
+    prompt = prompt_template.replace("{orientation}", orientation)
+    prompt = prompt.replace("ORIENTATION_PLACEHOLDER", orientation)
+    prompt = prompt.replace("{text_check}", text_check)
+    prompt = prompt.replace("{text_field}", text_field)
     
     try:
         response = gemini_client.models.generate_content(
