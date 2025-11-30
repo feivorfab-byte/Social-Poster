@@ -41,14 +41,14 @@ def home():
 
 @app.route('/analyze-image', methods=['POST'])
 def analyze_image():
-    """Analyze main reference image to get detailed description, camera angle, visible text, and real-world dimensions."""
+    """Analyze main reference image to get detailed description, camera angle, orientation, visible text, and real-world dimensions."""
     if 'image' not in request.files:
         return jsonify({"error": "No image file provided"}), 400
     
     file = request.files['image']
     
     prompt = """
-    Analyze this product photograph and provide THREE things:
+    Analyze this product photograph and provide FOUR things:
     
     1. DESCRIPTION: A concise, highly specific physical description of the object shown. 
        Focus on geometry, shape, materials, surface textures, and colors. 
@@ -58,13 +58,18 @@ def analyze_image():
        Examples: "top-down flat lay", "3/4 view from above-left", "straight-on front view", 
        "low angle looking up", "eye-level 3/4 view", "overhead slightly angled"
     
-    3. VISIBLE_TEXT: List ALL visible text, labels, logos, brand names, numbers, or words 
+    3. ORIENTATION: Is the product lying flat or standing upright? This affects how the background should be rendered.
+       - "flat_lay": Product is lying flat on a surface, camera looking down (like clothing laid out, items on a table)
+       - "standing": Product is upright/vertical, camera at eye level or slight angle (like a bottle standing, shoe upright)
+       - "angled": Product is at an angle, partially reclined, or ambiguous orientation
+    
+    4. VISIBLE_TEXT: List ALL visible text, labels, logos, brand names, numbers, or words 
        that appear anywhere on the object. Be EXACT - include the precise text, spelling, 
        capitalization, and location on the object. If no text is visible, use empty string.
        Examples: "Logo 'HELLO KITTY' on chest, 'Made in Japan' on tag", "Number '42' on side"
     
     Output as JSON:
-    {"description": "Object description...", "camera_angle": "angle description", "visible_text": "exact text found or empty string"}
+    {"description": "Object description...", "camera_angle": "angle description", "orientation": "flat_lay or standing or angled", "visible_text": "exact text found or empty string"}
     """
     
     try:
@@ -78,7 +83,10 @@ def analyze_image():
         result = json.loads(clean_json_text(response.text))
         description = result.get("description", "")
         camera_angle = result.get("camera_angle", "3/4 view")
+        orientation = result.get("orientation", "angled")
         visible_text = result.get("visible_text", "")
+        
+        print(f"--- Product orientation: {orientation}, camera: {camera_angle} ---")
         
         # Append visible text to description if present
         if visible_text:
@@ -125,6 +133,7 @@ Output ONLY the JSON."""
         return jsonify({
             "description": description,
             "camera_angle": camera_angle,
+            "orientation": orientation,
             "product_dimensions": product_dimensions
         })
     except Exception as e:
@@ -286,6 +295,7 @@ def generate_studio_image():
     # Background is now description-only (no image sent)
     background_description = request.form.get('backgroundDescription', '')
     product_dimensions = request.form.get('productDimensions', '')
+    orientation = request.form.get('orientation', 'angled')
     
     # Get detail images (up to 3)
     detail_images = []
@@ -314,6 +324,7 @@ def generate_studio_image():
         print(f"--- Background description: {background_description[:100] if background_description else 'None'}... ---")
         if product_dimensions:
             print(f"--- Product dimensions: {product_dimensions} ---")
+        print(f"--- Orientation: {orientation} ---")
         print(f"--- Prompt snippet: {prompt[:150]}... ---")
 
         # Build content parts with indexed labeling per Gemini 3 Pro best practices
@@ -326,7 +337,7 @@ def generate_studio_image():
             content_parts.append(types.Part.from_bytes(data=detail_bytes, mime_type=detail_mime))
         
         # Build the indexed labeled prompt
-        labeled_prompt = build_labeled_prompt(prompt, detail_labels, background_description, product_dimensions)
+        labeled_prompt = build_labeled_prompt(prompt, detail_labels, background_description, product_dimensions, orientation)
         content_parts.append(labeled_prompt)
 
         # Retry logic - try up to 3 times
@@ -376,7 +387,7 @@ def generate_studio_image():
         return jsonify({"error": str(e)}), 500
 
 
-def build_labeled_prompt(base_prompt, detail_labels, background_description="", product_dimensions=""):
+def build_labeled_prompt(base_prompt, detail_labels, background_description="", product_dimensions="", orientation="angled"):
     """
     Build an indexed labeled prompt for studio product photography.
     
@@ -385,6 +396,7 @@ def build_labeled_prompt(base_prompt, detail_labels, background_description="", 
     - Single source of truth (master image)
     - Background via detailed text description for consistency
     - Explicit preservation language
+    - Orientation-aware background perspective
     
     Image order:
     - Image 1: Main product reference (master)
@@ -415,6 +427,21 @@ def build_labeled_prompt(base_prompt, detail_labels, background_description="", 
         lines.append("BACKGROUND SURFACE - CRITICAL")
         lines.append("=" * 50)
         lines.append("")
+        
+        # Add orientation-specific instructions
+        if orientation == "flat_lay":
+            lines.append("ORIENTATION: The product is LYING FLAT and the camera is looking DOWN from above (flat lay/top-down shot).")
+            lines.append("The background surface must be rendered as a HORIZONTAL SURFACE viewed from directly above.")
+            lines.append("This is like looking down at a table or floor - NOT a vertical backdrop.")
+            lines.append("")
+        elif orientation == "standing":
+            lines.append("ORIENTATION: The product is STANDING UPRIGHT and the camera is at eye level or slightly above.")
+            lines.append("The background should show a surface the product is sitting/standing on, with proper perspective.")
+            lines.append("")
+        else:  # angled
+            lines.append("ORIENTATION: The product is at an angle. Render the background with appropriate perspective.")
+            lines.append("")
+        
         lines.append("Generate the background surface using this EXACT specification:")
         lines.append("")
         lines.append(f'"""{background_description}"""')
@@ -491,9 +518,7 @@ def generate_studio_image_v2():
     The insight: Products reproduce well because they're the primary focus.
     So let's make the background the primary focus first, then add the product.
     
-    Stage 1: 
-      - If has_branding: Reproduce the background EXACTLY (preserve text/logos)
-      - If no branding: Use image as STYLE REFERENCE, generate at proper scale
+    Stage 1: Reproduce the background EXACTLY (preserve text/logos)
     Stage 2: Add the product onto that background
     """
     if 'image' not in request.files:
@@ -507,6 +532,7 @@ def generate_studio_image_v2():
     material_scale = request.form.get('materialScale', '')
     product_dimensions = request.form.get('productDimensions', '')
     has_branding = request.form.get('hasBranding', 'false').lower() == 'true'
+    orientation = request.form.get('orientation', 'angled')
     
     # Background image - this time we USE it
     background_image = None
@@ -523,6 +549,7 @@ def generate_studio_image_v2():
     if product_dimensions:
         print(f"--- V2: Product dimensions: {product_dimensions} ---")
     print(f"--- V2: Has branding: {has_branding} ---")
+    print(f"--- V2: Orientation: {orientation} ---")
     
     # Get detail images
     detail_images = []
@@ -631,7 +658,7 @@ CRITICAL: Reproduce EVERYTHING in the image exactly. Every mark, every line, eve
         for detail_bytes, detail_mime in detail_images:
             stage2_parts.append(types.Part.from_bytes(data=detail_bytes, mime_type=detail_mime))
         
-        stage2_prompt = build_stage2_add_product_prompt(prompt, detail_labels, lighting_prompt, material_scale, product_dimensions)
+        stage2_prompt = build_stage2_add_product_prompt(prompt, detail_labels, lighting_prompt, material_scale, product_dimensions, orientation)
         stage2_parts.append(stage2_prompt)
         
         for attempt in range(max_retries):
@@ -709,7 +736,7 @@ def generate_studio_image_v1_internal(main_bytes, main_mime, prompt, quality, de
     return jsonify({"error": "Generation failed"}), 500
 
 
-def build_stage2_add_product_prompt(base_prompt, detail_labels, lighting_prompt, material_scale="", product_dimensions=""):
+def build_stage2_add_product_prompt(base_prompt, detail_labels, lighting_prompt, material_scale="", product_dimensions="", orientation="angled"):
     """Stage 2: Add product onto the reproduced background."""
     lines = []
     
@@ -726,6 +753,21 @@ def build_stage2_add_product_prompt(base_prompt, detail_labels, lighting_prompt,
     lines.append("TASK: Place the product onto the background")
     lines.append("=" * 50)
     lines.append("")
+    
+    # Add orientation-specific instructions
+    if orientation == "flat_lay":
+        lines.append("ORIENTATION: The product is LYING FLAT - this is a TOP-DOWN/FLAT LAY shot.")
+        lines.append("- Camera is looking straight down from above")
+        lines.append("- The background is a HORIZONTAL SURFACE (like a table) viewed from above")
+        lines.append("- The product should appear to be laying flat on this surface")
+        lines.append("- DO NOT render this as if the product is floating or against a vertical wall")
+        lines.append("")
+    elif orientation == "standing":
+        lines.append("ORIENTATION: The product is STANDING UPRIGHT.")
+        lines.append("- Camera is at eye level or slightly above")
+        lines.append("- The product sits/stands on the surface naturally")
+        lines.append("")
+    
     lines.append("Create a photograph where:")
     lines.append("- The product (Image 2) is reproduced EXACTLY and placed on the background surface")
     lines.append("- The product sits naturally with appropriate shadow and lighting")
