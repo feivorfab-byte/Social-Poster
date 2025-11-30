@@ -121,44 +121,54 @@ def analyze_background():
     file = request.files['image']
     
     prompt = """
-    Analyze this surface/material image in extreme detail for use as a studio photography backdrop.
+    Analyze this surface/material image in EXTREME detail for reproducible AI image generation.
+    
+    Your goal: Create a description so detailed and specific that an AI could generate this EXACT surface repeatedly with high consistency.
     
     Provide TWO things:
     
-    1. NAME: A short 2-4 word descriptive name (e.g., "Weathered Red Brick", "Dark Walnut Wood", "Carrara Marble")
+    1. NAME: A descriptive 2-4 word name (e.g., "Weathered Red Brick", "Dark Walnut Planks", "Polished Carrara Marble")
     
-    2. DESCRIPTION: A comprehensive, highly specific description (80-120 words) that would allow an AI to accurately recreate this exact surface. Include ALL of the following:
+    2. DESCRIPTION: A comprehensive specification (100-150 words) covering ALL of these aspects:
     
-    MATERIAL: Primary material type and composition
+    === MATERIAL IDENTIFICATION ===
+    - Exact material type (e.g., "reclaimed pine wood planks", "handmade clay bricks", "honed granite slab")
+    - Material origin/style if apparent (e.g., "industrial", "rustic farmhouse", "modern minimalist")
     
-    COLOR PALETTE: 
-    - Dominant color with specific tone (e.g., "warm terracotta red with orange undertones")
-    - Secondary colors and accent colors
-    - Color variation patterns (mottled, streaked, uniform, gradient)
+    === PRECISE COLOR SPECIFICATION ===
+    - Primary/dominant color with SPECIFIC descriptors (e.g., "warm terracotta red with burnt orange undertones and occasional charcoal-gray fire marks" NOT just "red")
+    - Secondary colors (list each with specific descriptors)
+    - Color temperature (warm, cool, neutral)
+    - Color saturation level (muted/desaturated, vibrant, rich)
+    - Any color gradients, variations, or mottling patterns
     
-    TEXTURE:
-    - Surface feel (rough, smooth, grainy, porous, polished)
-    - Texture depth (shallow scratches, deep grooves, raised patterns)
-    - Tactile qualities
+    === TEXTURE CHARACTERISTICS ===
+    - Surface roughness (mirror smooth, satin, slightly textured, rough, heavily textured, coarse)
+    - Texture type (wood grain, stone pitting, fabric weave, brushed, hammered, sandblasted)
+    - Texture depth and scale (fine hairline scratches, deep grooves, subtle undulations)
+    - Directional texture (horizontal grain, vertical striations, random, radial)
     
-    PATTERN:
-    - Pattern type (grain direction, tile layout, organic shapes, geometric)
-    - Pattern scale (fine grain, large format, varied sizes)
-    - Repeat characteristics (regular, irregular, random)
+    === PATTERN DETAILS ===
+    - Pattern type (linear planks, rectangular bricks, hexagonal tiles, organic veining, random aggregate)
+    - Element sizes and proportions (e.g., "4-inch wide planks", "standard brick format 2:1 ratio")
+    - Spacing/gaps/joints (tight seams, visible grout lines, natural gaps)
+    - Pattern regularity (uniform grid, staggered/offset, deliberately random)
     
-    SURFACE FINISH:
-    - Reflectivity (matte, satin, semi-gloss, high-gloss)
-    - How light interacts with the surface
+    === SURFACE FINISH & LIGHT BEHAVIOR ===
+    - Reflectivity level (matte/flat, eggshell, satin, semi-gloss, high-gloss, mirror)
+    - How highlights appear (soft diffused, sharp specular, none)
+    - Shadow behavior in texture (deep shadows in grooves, subtle shading, minimal shadow)
     
-    CONDITION/CHARACTER:
-    - Age indicators (new, weathered, distressed, vintage)
-    - Wear patterns, patina, or unique characteristics
-    - Any grout, mortar, joints, or seams
+    === AGING & CHARACTER ===
+    - Wear indicators (pristine, light wear, moderately distressed, heavily weathered, antique)
+    - Specific wear patterns (rounded edges, faded areas, stains, chips, cracks)
+    - Patina or finish changes over time
+    - Any grout, mortar, filler (color, width, condition)
     
-    Be extremely specific with colors - use descriptive terms like "dusty rose", "charcoal gray with blue undertones", "honey gold", "slate blue-gray" rather than generic color names.
+    Be EXTREMELY specific. Instead of "brown wood", say "medium-toned American walnut with prominent dark chocolate grain lines, honey-gold highlights between grain, and a hand-rubbed oil finish giving soft satin sheen."
     
     Output as JSON:
-    {"name": "Short Name", "description": "Comprehensive detailed description..."}
+    {"name": "Short Name", "description": "Extremely detailed reproducible description..."}
     """
     
     try:
@@ -180,6 +190,9 @@ def analyze_background():
         words = name.split()
         if len(words) > 4:
             name = ' '.join(words[:4])
+        
+        print(f"--- Background analyzed: {name} ---")
+        print(f"--- Description length: {len(description)} chars ---")
         
         return jsonify({"name": name, "description": description})
     except Exception as e:
@@ -303,7 +316,7 @@ def build_labeled_prompt(base_prompt, detail_labels, background_description=""):
     Following Gemini 3 Pro best practices:
     - Indexed image labeling (Image 1, Image 2, etc.)
     - Single source of truth (master image)
-    - Background via text description (not image) for consistency
+    - Background via detailed text description for consistency
     - Explicit preservation language
     
     Image order:
@@ -329,19 +342,23 @@ def build_labeled_prompt(base_prompt, detail_labels, background_description=""):
     lines.append(base_prompt)
     
     # Background handling - detailed description for consistent reproduction
-    lines.append("")
     if background_description:
-        lines.append("BACKGROUND SURFACE SPECIFICATION:")
-        lines.append("Generate a studio backdrop surface that EXACTLY matches the following detailed material description.")
-        lines.append("Use EVERY detail provided - colors, textures, patterns, finish, and characteristics.")
         lines.append("")
-        lines.append(f"MATERIAL DESCRIPTION: {background_description}")
+        lines.append("=" * 50)
+        lines.append("BACKGROUND SURFACE - CRITICAL")
+        lines.append("=" * 50)
         lines.append("")
-        lines.append("Reproduce this surface with high fidelity to the description above.")
+        lines.append("Generate the background surface using this EXACT specification:")
+        lines.append("")
+        lines.append(f'"""{background_description}"""')
+        lines.append("")
+        lines.append("IMPORTANT: Follow the material description PRECISELY. Match the exact colors, textures, patterns, finish, and aging/wear characteristics described. The surface must look like the specific material described, not a generic version of it.")
         lines.append("")
     
     # Core requirements
-    lines.append("CRITICAL REQUIREMENTS:")
+    lines.append("=" * 50)
+    lines.append("REQUIREMENTS")
+    lines.append("=" * 50)
     lines.append("")
     lines.append("1. OBJECT FIDELITY")
     lines.append("   - Recreate the EXACT object from Image 1")
