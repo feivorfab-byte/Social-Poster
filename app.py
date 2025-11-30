@@ -233,7 +233,7 @@ def build_labeled_prompt(base_prompt, detail_labels, has_background=False):
     
     # Label background image if present
     if has_background:
-        lines.append(f"- Image {next_idx}: Background style reference (use this image's texture, material, color, and pattern for the studio backdrop - but apply the lighting described in the prompt to create realistic light interaction, shadows, and reflections on this background surface)")
+        lines.append(f"- Image {next_idx}: Background/environment reference (recreate this surface/environment as the setting for the product)")
         next_idx += 1
     
     # Label detail images
@@ -249,10 +249,14 @@ def build_labeled_prompt(base_prompt, detail_labels, has_background=False):
     # Add preservation language per best practices
     lines.append("")
     if has_background:
-        lines.append("CRITICAL BACKGROUND INSTRUCTIONS:")
-        lines.append("1. Recreate the background using the SAME material, texture, color, and pattern from Image 2")
-        lines.append("2. Apply the studio lighting from the prompt to the background - show realistic light falloff, shadows, and any reflections or highlights that would naturally occur on this surface type")
-        lines.append("3. The background should look like it's physically in the same studio environment as the product, lit by the same light sources")
+        lines.append("CRITICAL BACKGROUND & LIGHTING INTEGRATION:")
+        lines.append("1. Place the product WITHIN the environment from Image 2 - it should look like it was actually photographed there")
+        lines.append("2. Match the ambient lighting of the background environment - if the background has warm tones, the product should have warm light hitting it")
+        lines.append("3. Add realistic CONTACT SHADOWS where the product meets the surface - soft diffused shadows that anchor the object to the background")
+        lines.append("4. Add subtle REFLECTED COLOR from the background onto the product edges (color spill/bounce light)")
+        lines.append("5. Match the depth of field and focus characteristics between product and background")
+        lines.append("6. If the background has texture (brick, wood, fabric), ensure the lighting reveals that texture naturally")
+        lines.append("7. The final image should look like a single photograph, not a composite")
         lines.append("")
     lines.append("Preserve the exact object from Image 1.")
     if detail_labels:
