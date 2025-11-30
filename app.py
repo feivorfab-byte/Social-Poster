@@ -99,6 +99,7 @@ def generate_studio_image():
     - Main reference first, details in sequence
     - Preservation language for critical features
     - Single-source-of-truth master image approach
+    - Optional background reference image for brand consistency
     """
     if 'image' not in request.files:
         return jsonify({"error": "No reference image provided"}), 400
@@ -107,43 +108,60 @@ def generate_studio_image():
     prompt = request.form.get('prompt', 'Turn this into a studio photograph.')
     quality = request.form.get('quality', '1K')
     
+    # Check for background reference image
+    background_image = None
+    background_mime = None
+    if 'backgroundImage' in request.files:
+        bg_file = request.files['backgroundImage']
+        background_image = bg_file.read()
+        background_mime = bg_file.content_type
+        print(f"--- Background reference image received: {len(background_image)} bytes ---")
+    
     # Get detail images (up to 3)
     detail_images = []
     detail_labels = []
     
     for i in range(1, 4):  # detail1, detail2, detail3
         detail_key = f'detail{i}'
-        label_key = f'detail{i}_label'
+        # Support both label key formats
+        label_key = f'detail{i}Label'  # iOS sends this
+        label_key_alt = f'detail{i}_label'  # Alternative format
         
         if detail_key in request.files:
             detail_file = request.files[detail_key]
             detail_bytes = detail_file.read()
             detail_images.append((detail_bytes, detail_file.content_type))
-            detail_labels.append(request.form.get(label_key, f'Detail {i}'))
+            # Try both label key formats
+            label = request.form.get(label_key) or request.form.get(label_key_alt) or f'Detail {i}'
+            detail_labels.append(label)
     
-    # Validate quality parameter
-    if quality not in ['1K', '2K', '4K']:
+    # Validate quality parameter (only 1K and 2K now)
+    if quality not in ['1K', '2K']:
         quality = '1K'
     
     try:
         main_image_bytes = main_file.read()
-        print(f"--- Generating {quality} image with {len(detail_images)} detail reference(s) ---")
+        has_bg = background_image is not None
+        print(f"--- Generating {quality} image with {len(detail_images)} detail ref(s), background ref: {has_bg} ---")
         print(f"--- Prompt snippet: {prompt[:150]}... ---")
 
         # Build content parts with explicit labeling per Gemini 3 Pro best practices
-        # Order: Main reference first (establishes subject), then details for specific areas
+        # Order: Main reference first (establishes subject), then background, then details
         content_parts = []
         
         # Image 1: Main reference (master image - single source of truth)
         content_parts.append(types.Part.from_bytes(data=main_image_bytes, mime_type=main_file.content_type))
+        
+        # Image 2 (optional): Background reference
+        if background_image:
+            content_parts.append(types.Part.from_bytes(data=background_image, mime_type=background_mime))
         
         # Add detail images in sequence
         for detail_bytes, detail_mime in detail_images:
             content_parts.append(types.Part.from_bytes(data=detail_bytes, mime_type=detail_mime))
         
         # Build the explicitly labeled prompt
-        # This follows the "explicit labeling" best practice from Gemini 3 Pro docs
-        labeled_prompt = build_labeled_prompt(prompt, detail_labels)
+        labeled_prompt = build_labeled_prompt(prompt, detail_labels, has_background=has_bg)
         content_parts.append(labeled_prompt)
 
         # Retry logic - try up to 3 times
@@ -172,7 +190,7 @@ def generate_studio_image():
                             print(f"--- {quality} Image generated on attempt {attempt + 1}. Size: {len(part.inline_data.data)} bytes ---")
                             return jsonify({
                                 "message": "Image generated successfully",
-                                "image_base64": generated_image_b64
+                                "image": generated_image_b64
                             })
                 
                 # No image in response, retry
@@ -193,14 +211,14 @@ def generate_studio_image():
         return jsonify({"error": str(e)}), 500
 
 
-def build_labeled_prompt(base_prompt, detail_labels):
+def build_labeled_prompt(base_prompt, detail_labels, has_background=False):
     """
     Build an explicitly labeled prompt following Gemini 3 Pro best practices.
     
     Format:
     - Image 1: Main reference (master product image)
-    - Image 2: [detail label] (detail reference)
-    - Image 3: [detail label] (detail reference)
+    - Image 2: Background reference (if provided)
+    - Image 3+: [detail label] (detail reference)
     ...
     
     [Base prompt with preservation language]
@@ -210,9 +228,18 @@ def build_labeled_prompt(base_prompt, detail_labels):
     # Always label Image 1 as the master reference
     lines.append("- Image 1: Main reference image (master product shot - use this as the authoritative source for the object's shape, proportions, and overall appearance)")
     
+    # Track image index
+    next_idx = 2
+    
+    # Label background image if present
+    if has_background:
+        lines.append(f"- Image {next_idx}: Background reference image (use this exact background style, texture, color, and lighting for the studio backdrop)")
+        next_idx += 1
+    
     # Label detail images
-    for i, label in enumerate(detail_labels, start=2):
-        lines.append(f"- Image {i}: {label} (detail reference - use for rendering this specific area accurately)")
+    for i, label in enumerate(detail_labels):
+        lines.append(f"- Image {next_idx}: {label} (detail reference - use for rendering this specific area accurately)")
+        next_idx += 1
     
     # Add the base prompt with preservation emphasis
     lines.append("")
@@ -220,9 +247,11 @@ def build_labeled_prompt(base_prompt, detail_labels):
     lines.append(base_prompt)
     
     # Add preservation language per best practices
+    lines.append("")
+    if has_background:
+        lines.append("CRITICAL: Preserve the exact object from Image 1. Recreate the background to match Image 2's style, texture, and color as closely as possible.")
     if detail_labels:
-        lines.append("")
-        lines.append("CRITICAL: Preserve the exact object from Image 1. Use the detail reference images to ensure accurate rendering of specific areas, textures, and fine details that may not be fully visible in the main reference.")
+        lines.append("Use the detail reference images to ensure accurate rendering of specific areas, textures, and fine details that may not be fully visible in the main reference.")
     
     return "\n".join(lines)
 
