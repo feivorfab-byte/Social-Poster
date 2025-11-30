@@ -593,105 +593,98 @@ def generate_studio_image_v2():
 
 def build_stage1_prompt(base_prompt, detail_labels, has_background_image=False, background_description=""):
     """
-    Stage 1 prompt: Focus on perfect object placement and background integration.
-    Uses soft, even lighting to make integration easier.
+    New approach: Treat product and background as TWO objects to faithfully recreate,
+    then blend them into one photograph using Google's recommended "blend" language.
     """
     lines = []
     
-    lines.append("IMAGE REFERENCES:")
-    lines.append("Image 1: PRODUCT - Recreate this EXACT object with perfect fidelity. Match every detail.")
-    
-    next_idx = 2
     if has_background_image:
-        lines.append(f"Image {next_idx}: BACKGROUND SURFACE - Recreate this EXACT surface with perfect fidelity. Match every detail of the material, color, texture, and pattern.")
-        next_idx += 1
-    
-    for label in detail_labels:
-        lines.append(f"Image {next_idx}: Detail reference - '{label}'")
-        next_idx += 1
-    
-    lines.append("")
-    lines.append("=" * 50)
-    lines.append("TASK: RECREATE BOTH IMAGES INTO ONE PHOTOGRAPH")
-    lines.append("=" * 50)
-    lines.append("")
-    lines.append("Combine Image 1 (product) and Image 2 (surface) into a single studio photograph.")
-    lines.append("")
-    lines.append(base_prompt)
-    lines.append("")
-    
-    if has_background_image:
-        lines.append("CRITICAL - EXACT REPRODUCTION OF BOTH:")
+        # Use Google's recommended indexed + blend approach
+        lines.append("You are given TWO reference images to blend into ONE photograph:")
         lines.append("")
-        lines.append("For the PRODUCT (Image 1):")
-        lines.append("- Recreate the EXACT object - same shape, colors, materials, details")
-        lines.append("- This is not inspiration, this is the object to reproduce exactly")
+        lines.append("Image 1: THE PRODUCT")
+        lines.append("- A product/object to be photographed")
+        lines.append("- Recreate this object EXACTLY as shown - same shape, proportions, colors, materials, every detail")
         lines.append("")
-        lines.append("For the BACKGROUND (Image 2):")
-        lines.append("- Recreate the EXACT surface - same material, color, texture, pattern")
-        lines.append("- This is not inspiration, this is the surface to reproduce exactly")
-        lines.append("- Use this as a FLAT STUDIO BACKDROP (like seamless paper/infinity cove)")
-        lines.append("- ONE continuous surface only - not a room, not a corner, not multiple surfaces")
+        lines.append("Image 2: THE SURFACE")
+        lines.append("- A flat surface/material")
+        lines.append("- Recreate this surface EXACTLY as shown - same material, colors, texture, pattern, every detail")
+        lines.append("")
+        
+        for i, label in enumerate(detail_labels):
+            lines.append(f"Image {i + 3}: Detail reference for '{label}'")
+        if detail_labels:
+            lines.append("")
+        
+        lines.append("=" * 50)
+        lines.append("TASK: BLEND Image 1 and Image 2 into ONE studio photograph")
+        lines.append("=" * 50)
+        lines.append("")
+        lines.append("Create a photograph where:")
+        lines.append("- The product from Image 1 sits on the surface from Image 2")
+        lines.append("- KEEP: The exact product from Image 1 (perfectly recreated)")
+        lines.append("- KEEP: The exact surface from Image 2 (perfectly recreated)")  
+        lines.append("- The surface acts as a flat studio backdrop filling the frame")
+        lines.append("")
+        lines.append(base_prompt)
+        lines.append("")
+        
         if background_description:
-            lines.append(f"- Surface details: {background_description}")
-        lines.append("")
+            lines.append(f"Surface material details: {background_description}")
+            lines.append("")
+        
         lines.append("COMPOSITION:")
-        lines.append("- Place the product ON/AGAINST the background surface")
-        lines.append("- The surface fills the entire background of the frame")
+        lines.append("- Product placed centrally on the surface")
+        lines.append("- Surface extends to fill entire background (like seamless studio paper)")
         lines.append("- Natural contact shadow where product meets surface")
+        lines.append("- Both elements lit by the same light source")
         lines.append("")
-    
-    lines.append("LIGHTING FOR THIS STAGE:")
-    lines.append("- Soft, diffused, even lighting")
-    lines.append("- Minimal harsh shadows")
-    lines.append("- Clean integration first, dramatic lighting comes in Stage 2")
-    lines.append("")
-    
-    lines.append("PHOTOREALISM:")
-    lines.append("- Real photograph, NOT a 3D render")
-    lines.append("- Natural material textures")
-    lines.append("- Subtle film grain, natural depth of field")
+        
+        lines.append("LIGHTING:")
+        lines.append("- Soft, even, diffused studio lighting")
+        lines.append("- Light falls naturally on both product AND surface")
+        lines.append("- Consistent shadows and highlights across both")
+        lines.append("")
+        
+        lines.append("OUTPUT: One cohesive photograph that looks like the product was actually photographed on that surface.")
+        
+    else:
+        # No background image - simpler prompt
+        lines.append("IMAGE REFERENCES:")
+        lines.append("Image 1: Product to recreate exactly")
+        for i, label in enumerate(detail_labels):
+            lines.append(f"Image {i + 2}: Detail reference - '{label}'")
+        lines.append("")
+        lines.append(base_prompt)
+        lines.append("")
+        lines.append("Recreate the exact product from Image 1 in a professional studio setting.")
     
     return "\n".join(lines)
 
 
 def build_stage2_prompt(lighting_prompt):
     """
-    Stage 2 prompt: Apply the user's lighting scheme to the composed image.
-    Preserve everything else - just change the lighting.
+    Stage 2 prompt: Subtle lighting adjustment.
+    Research shows incremental edits work better than sweeping changes.
     """
     lines = []
     
-    lines.append("IMAGE REFERENCE:")
-    lines.append("Image 1: Source photograph - preserve this EXACTLY, only modify the lighting.")
+    lines.append("Take this photograph and adjust the lighting slightly.")
     lines.append("")
-    lines.append("=" * 50)
-    lines.append("STAGE 2: LIGHTING TRANSFORMATION")
-    lines.append("=" * 50)
+    lines.append("KEEP EVERYTHING THE SAME:")
+    lines.append("- Same product, same position, same surface, same composition")
+    lines.append("- Do not regenerate or redraw anything")
+    lines.append("- Only adjust how the existing light falls")
     lines.append("")
-    lines.append("Re-light this photograph with the following lighting setup:")
-    lines.append("")
+    lines.append("LIGHTING ADJUSTMENT:")
     
     if lighting_prompt:
         lines.append(lighting_prompt)
     else:
-        lines.append("Professional studio lighting - three-point softbox setup")
+        lines.append("Professional three-point studio lighting")
     
     lines.append("")
-    lines.append("CRITICAL - PRESERVE EVERYTHING ELSE:")
-    lines.append("- Keep the EXACT same object in the EXACT same position")
-    lines.append("- Keep the EXACT same background/surface")
-    lines.append("- Keep the EXACT same camera angle and framing")
-    lines.append("- Keep the EXACT same composition")
-    lines.append("- ONLY change how light falls on the scene")
-    lines.append("")
-    lines.append("LIGHTING TRANSFORMATION ONLY:")
-    lines.append("- Adjust shadows and highlights according to new lighting")
-    lines.append("- Update reflections/specular highlights for new light direction")
-    lines.append("- Maintain realistic light behavior on all materials")
-    lines.append("- Background surface should respond to new lighting naturally")
-    lines.append("")
-    lines.append("OUTPUT: The same photograph, re-lit. Nothing else changes.")
+    lines.append("This is a subtle lighting adjustment, not a complete re-render.")
     
     return "\n".join(lines)
 
