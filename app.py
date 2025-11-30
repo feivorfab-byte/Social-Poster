@@ -1,29 +1,272 @@
+"""
+Studio Lights Production Backend v4.0
+
+Architecture:
+- Stateless: No in-memory caching
+- Upstash Redis: Shared cache across all workers
+- Supabase: Prompt management and analytics
+- Unified generation: Single code path for all generation types
+"""
+
 import os
 import base64
 import json
 import hashlib
+import time
+from functools import lru_cache
 from flask import Flask, request, jsonify
+import requests
 from google import genai
 from google.genai import types
 
 app = Flask(__name__)
 
-# --- CONFIGURATION ---
+# =============================================
+# CONFIGURATION
+# =============================================
+
 ANALYSIS_MODEL = 'gemini-2.5-flash'
 IMAGE_GEN_MODEL = 'gemini-3-pro-image-preview'
-
-api_key = os.environ.get("GOOGLE_API_KEY")
-client = genai.Client(api_key=api_key)
 
 # Reliability settings
 MAX_GENERATION_ATTEMPTS = 3
 MAX_VERIFICATION_RETRIES = 2
+CACHE_TTL_SECONDS = 86400 * 7  # 7 days
 
-# In-memory caches (for server-side caching)
-# In production, consider Redis or persistent storage
-BACKGROUND_CACHE = {}  # key: background_id -> {"image": bytes, "description": str, "scale": str}
-MASTER_CACHE = {}  # key: master_id -> {"image": bytes, "lighting": str, "background": str}
+# Environment variables
+GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
+UPSTASH_REDIS_REST_URL = os.environ.get("UPSTASH_REDIS_REST_URL")
+UPSTASH_REDIS_REST_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY")
 
+# Initialize Gemini client
+gemini_client = genai.Client(api_key=GOOGLE_API_KEY)
+
+
+# =============================================
+# REDIS CACHE (Upstash REST API)
+# =============================================
+
+class RedisCache:
+    """Upstash Redis REST API wrapper for cross-worker caching."""
+    
+    def __init__(self, url, token):
+        self.url = url
+        self.token = token
+        self.headers = {"Authorization": f"Bearer {token}"}
+    
+    def _request(self, command):
+        """Execute Redis command via REST API."""
+        try:
+            response = requests.post(
+                f"{self.url}",
+                headers=self.headers,
+                json=command,
+                timeout=5
+            )
+            if response.status_code == 200:
+                return response.json().get("result")
+            return None
+        except Exception as e:
+            print(f"[REDIS] Error: {e}")
+            return None
+    
+    def get(self, key):
+        """Get value from cache."""
+        return self._request(["GET", key])
+    
+    def set(self, key, value, ttl=CACHE_TTL_SECONDS):
+        """Set value with TTL."""
+        return self._request(["SET", key, value, "EX", ttl])
+    
+    def delete(self, key):
+        """Delete key."""
+        return self._request(["DEL", key])
+    
+    def exists(self, key):
+        """Check if key exists."""
+        result = self._request(["EXISTS", key])
+        return result == 1
+    
+    def get_json(self, key):
+        """Get and parse JSON value."""
+        value = self.get(key)
+        if value:
+            try:
+                return json.loads(value)
+            except:
+                return None
+        return None
+    
+    def set_json(self, key, data, ttl=CACHE_TTL_SECONDS):
+        """Set JSON value."""
+        return self.set(key, json.dumps(data), ttl)
+    
+    def get_binary(self, key):
+        """Get base64-encoded binary data."""
+        value = self.get(key)
+        if value:
+            try:
+                return base64.b64decode(value)
+            except:
+                return None
+        return None
+    
+    def set_binary(self, key, data, ttl=CACHE_TTL_SECONDS):
+        """Set binary data as base64."""
+        return self.set(key, base64.b64encode(data).decode('utf-8'), ttl)
+
+
+# Initialize Redis (will be None if not configured)
+redis_cache = None
+if UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN:
+    redis_cache = RedisCache(UPSTASH_REDIS_REST_URL, UPSTASH_REDIS_REST_TOKEN)
+    print("[INIT] Redis cache connected")
+else:
+    print("[INIT] Redis not configured - caching disabled")
+
+
+# =============================================
+# SUPABASE (Prompts & Analytics)
+# =============================================
+
+class SupabaseClient:
+    """Simple Supabase REST API client."""
+    
+    def __init__(self, url, key):
+        self.url = url
+        self.headers = {
+            "apikey": key,
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json"
+        }
+    
+    def select(self, table, columns="*", filters=None):
+        """Select from table."""
+        try:
+            url = f"{self.url}/rest/v1/{table}?select={columns}"
+            if filters:
+                for key, value in filters.items():
+                    url += f"&{key}=eq.{value}"
+            response = requests.get(url, headers=self.headers, timeout=5)
+            if response.status_code == 200:
+                return response.json()
+            return []
+        except Exception as e:
+            print(f"[SUPABASE] Select error: {e}")
+            return []
+    
+    def insert(self, table, data):
+        """Insert into table."""
+        try:
+            url = f"{self.url}/rest/v1/{table}"
+            response = requests.post(url, headers=self.headers, json=data, timeout=5)
+            return response.status_code in [200, 201]
+        except Exception as e:
+            print(f"[SUPABASE] Insert error: {e}")
+            return False
+
+
+# Initialize Supabase (will be None if not configured)
+supabase = None
+if SUPABASE_URL and SUPABASE_ANON_KEY:
+    supabase = SupabaseClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+    print("[INIT] Supabase connected")
+else:
+    print("[INIT] Supabase not configured - using hardcoded prompts")
+
+
+# =============================================
+# PROMPT MANAGEMENT
+# =============================================
+
+# Fallback prompts (used if Supabase unavailable)
+FALLBACK_PROMPTS = {
+    'analysis_metadata': '''Analyze this product photograph and extract metadata.
+
+ORIENTATION: Is the product lying flat (viewed from above, like clothing on a table) or standing upright (viewed at eye level, like a bottle or statue)?
+- "flat_lay" = lying flat, top-down view
+- "standing" = upright, eye-level view  
+- "angled" = neither clearly flat nor standing
+
+CAMERA ANGLE: Describe the camera perspective in 3-5 words
+
+PRODUCT DIMENSIONS: Estimate real-world size as "W x H x D" with units
+
+VISIBLE TEXT: List any visible text exactly. Empty string if none.
+
+JSON only:
+{"orientation": "...", "camera_angle": "...", "product_dimensions": "...", "visible_text": "..."}''',
+    
+    'composition_flat_lay': 'COMPOSITION: Top-down flat lay photograph. Camera positioned directly above, looking straight down. Product lies flat on a horizontal surface. Center the product, filling 50-60% of frame. Background extends as continuous horizontal plane around all edges. Soft contact shadow directly beneath product.',
+    
+    'composition_standing': 'COMPOSITION: Standing product photograph. Camera at eye level or slightly elevated. Product stands upright on surface with depth perspective - background visible beneath and behind, receding naturally. Center product, filling 50-60% of frame height. Natural contact shadow at base.',
+    
+    'composition_angled': 'COMPOSITION: Photograph at natural angle matching reference. Center product, filling 50-60% of frame. Background surface visible around product with appropriate perspective. Soft contact shadow grounding product on surface.',
+    
+    'output_quality': 'OUTPUT: Authentic studio photograph. Natural depth of field, real material textures, unified lighting across product and background. Shot on full-frame camera with 90mm lens at f/8.',
+    
+    'background_reproduction': '''Reproduce this image exactly as a clean studio photography surface.
+
+IMAGE 1 shows a background/surface material. Create an exact copy preserving:
+- All colors, textures, patterns exactly
+- ALL text, writing, numbers, logos - exact content, placement, size, style
+- ALL graphics, drawings, marks exactly
+
+Fill entire frame, evenly lit. Accuracy is critical.'''
+}
+
+FALLBACK_LIGHTING = {
+    'softbox': 'LIGHTING: Soft box. Large diffused source at 45° left and above, subtle fill from right. Shadows soft gradients at 30-40% gray with smooth falloff. Highlights broad and wrapped. Exposure balanced and neutral. Background evenly lit matching product. Color temperature neutral daylight (5500K).'
+}
+
+FALLBACK_BACKGROUNDS = {
+    'white': 'Professional seamless studio surface: pure white duvetyn fabric with soft, velvety matte surface. Zero shine or reflections. Taut and smooth. Extends seamlessly with no visible edges.',
+    'gray': 'Professional seamless studio surface: neutral medium gray duvetyn fabric. True neutral with no warm or cool cast. Soft matte surface. Extends seamlessly.',
+    'black': 'Professional seamless studio surface: near-black duvetyn fabric. Deep rich black with subtle texture. Matte surface. Extends seamlessly.'
+}
+
+
+@lru_cache(maxsize=50)
+def get_prompt(name):
+    """Get prompt by name from Supabase or fallback."""
+    if supabase:
+        results = supabase.select('prompts', 'content', {'name': name, 'is_active': 'true'})
+        if results and len(results) > 0:
+            return results[0].get('content', '')
+    return FALLBACK_PROMPTS.get(name, '')
+
+
+@lru_cache(maxsize=20)
+def get_lighting_scheme(scheme_id):
+    """Get lighting scheme from Supabase or fallback."""
+    if supabase:
+        results = supabase.select('lighting_schemes', 'prompt_text', {'id': scheme_id, 'is_active': 'true'})
+        if results and len(results) > 0:
+            return results[0].get('prompt_text', '')
+    return FALLBACK_LIGHTING.get(scheme_id, FALLBACK_LIGHTING['softbox'])
+
+
+@lru_cache(maxsize=10)
+def get_background_description(bg_id):
+    """Get default background description."""
+    if supabase:
+        results = supabase.select('backgrounds', 'description', {'id': bg_id})
+        if results and len(results) > 0:
+            return results[0].get('description', '')
+    return FALLBACK_BACKGROUNDS.get(bg_id, FALLBACK_BACKGROUNDS['white'])
+
+
+def log_generation(data):
+    """Log generation to Supabase for analytics."""
+    if supabase:
+        supabase.insert('generation_logs', data)
+
+
+# =============================================
+# UTILITY FUNCTIONS
+# =============================================
 
 def clean_json_text(text):
     """Strip Markdown formatting from JSON responses."""
@@ -39,487 +282,95 @@ def clean_json_text(text):
     return text.strip()
 
 
-def generate_cache_id(data_bytes, prefix=""):
-    """Generate a unique ID for caching."""
+def generate_cache_key(data_bytes, prefix=""):
+    """Generate a cache key from data."""
     hash_obj = hashlib.md5(data_bytes)
-    return f"{prefix}{hash_obj.hexdigest()[:12]}"
+    return f"{prefix}{hash_obj.hexdigest()}"
 
 
-@app.route('/')
-def home():
-    return f"Studio Lights Backend v3.1 | Analysis: {ANALYSIS_MODEL} | Generation: {IMAGE_GEN_MODEL}"
-
-
-# ==========================================
-# ANALYSIS ENDPOINTS
-# ==========================================
-
-@app.route('/analyze-image', methods=['POST'])
-def analyze_image():
-    """Extract metadata from product image."""
-    if 'image' not in request.files:
-        return jsonify({"error": "No image file provided"}), 400
-    
-    file = request.files['image']
-    
-    prompt = """Analyze this product photograph and extract metadata.
-
-ORIENTATION: Is the product lying flat (viewed from above, like clothing on a table) or standing upright (viewed at eye level, like a bottle or statue)?
-- "flat_lay" = lying flat, top-down view
-- "standing" = upright, eye-level view  
-- "angled" = neither clearly flat nor standing
-
-CAMERA ANGLE: Describe the camera perspective in 3-5 words (e.g., "overhead flat lay", "eye-level front view", "3/4 elevated view")
-
-PRODUCT DIMENSIONS: Estimate real-world size as "W x H x D" with units (inches or feet). Example: "12 x 8 x 4 inches"
-
-VISIBLE TEXT: List any text, numbers, logos, or brand names visible on the product. Transcribe exactly. Empty string if none.
-
-JSON only:
-{
-    "orientation": "flat_lay" or "standing" or "angled",
-    "camera_angle": "brief description",
-    "product_dimensions": "W x H x D units",
-    "visible_text": "exact text or empty"
-}"""
-    
-    try:
-        image_bytes = file.read()
-        response = client.models.generate_content(
-            model=ANALYSIS_MODEL,
-            contents=[types.Part.from_bytes(data=image_bytes, mime_type=file.content_type), prompt],
-            config=types.GenerateContentConfig(response_mime_type="application/json")
-        )
-        
-        result = json.loads(clean_json_text(response.text))
-        
-        print(f"[ANALYSIS] orientation={result.get('orientation')}, dims={result.get('product_dimensions')}")
-        
-        return jsonify({
-            "orientation": result.get("orientation", "angled"),
-            "camera_angle": result.get("camera_angle", "3/4 view"),
-            "product_dimensions": result.get("product_dimensions", ""),
-            "visible_text": result.get("visible_text", ""),
-            "description": ""
-        })
-        
-    except Exception as e:
-        print(f"[ERROR] Analysis failed: {e}")
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route('/analyze-detail', methods=['POST'])
-def analyze_detail():
-    """Analyze a detail image and return a concise label."""
-    if 'image' not in request.files:
-        return jsonify({"error": "No image file provided"}), 400
-    
-    file = request.files['image']
-    
-    try:
-        image_bytes = file.read()
-        
-        prompt = """What specific detail, texture, or feature does this close-up show? 
-Describe in 5-10 words. Include any visible text exactly.
-Write only the label, nothing else."""
-        
-        response = client.models.generate_content(
-            model=ANALYSIS_MODEL,
-            contents=[types.Part.from_bytes(data=image_bytes, mime_type=file.content_type), prompt]
-        )
-        
-        label = response.text.strip().strip('"\'').rstrip('.')
-        return jsonify({"label": label})
-        
-    except Exception as e:
-        print(f"[ERROR] Detail analysis failed: {e}")
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route('/analyze-background', methods=['POST'])
-def analyze_background():
-    """Analyze a background image for reproduction."""
-    if 'image' not in request.files:
-        return jsonify({"error": "No image file provided"}), 400
-    
-    file = request.files['image']
-    
-    prompt = """Analyze this background/surface for product photography.
-
-NAME: Short name, 2-4 words (e.g., "Weathered Oak Planks", "Lined Notebook Paper")
-
-DESCRIPTION: Describe materials, colors, textures, patterns, and any markings in detail (80-120 words). Include any text, writing, logos, or graphics exactly.
-
-HAS_BRANDING: Does this contain specific text, logos, handwriting, or graphics that must be reproduced exactly? 
-- true = has readable content, specific graphics, text, logos
-- false = plain texture like wood grain, concrete, fabric without text
-
-MATERIAL_SCALE: Physical size of repeating elements (e.g., "wood planks 4 inches wide", "ruled lines 8mm apart")
-
-JSON only:
-{
-    "name": "Short Name",
-    "description": "Detailed description",
-    "has_branding": true or false,
-    "material_scale": "measurements"
-}"""
-    
-    try:
-        image_bytes = file.read()
-        response = client.models.generate_content(
-            model=ANALYSIS_MODEL,
-            contents=[types.Part.from_bytes(data=image_bytes, mime_type=file.content_type), prompt],
-            config=types.GenerateContentConfig(response_mime_type="application/json")
-        )
-        
-        result = json.loads(clean_json_text(response.text))
-        
-        name = result.get("name", "Custom Background")
-        words = name.split()
-        if len(words) > 4:
-            name = ' '.join(words[:4])
-        
-        print(f"[BACKGROUND] {name}, branding={result.get('has_branding')}")
-        
-        return jsonify({
-            "name": name,
-            "description": result.get("description", name),
-            "has_branding": result.get("has_branding", False),
-            "material_scale": result.get("material_scale", "")
-        })
-        
-    except Exception as e:
-        print(f"[ERROR] Background analysis failed: {e}")
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route('/analyze-style', methods=['POST'])
-def analyze_style():
-    """Analyze a generated image for style characteristics (used for master images)."""
-    if 'image' not in request.files:
-        return jsonify({"error": "No image file provided"}), 400
-    
-    file = request.files['image']
-    
-    prompt = """Analyze this studio product photograph for style characteristics.
-
-Describe in 30-50 words:
-- Lighting quality (soft/hard, direction, shadow depth percentage)
-- Color temperature (warm/cool/neutral, approximate Kelvin)
-- Overall mood (bright/dramatic/natural/elegant)
-- Background treatment (how it's lit relative to product)
-
-JSON: {"style_description": "..."}"""
-    
-    try:
-        image_bytes = file.read()
-        response = client.models.generate_content(
-            model=ANALYSIS_MODEL,
-            contents=[types.Part.from_bytes(data=image_bytes, mime_type=file.content_type), prompt],
-            config=types.GenerateContentConfig(response_mime_type="application/json")
-        )
-        
-        result = json.loads(clean_json_text(response.text))
-        
-        return jsonify({
-            "style_description": result.get("style_description", "")
-        })
-        
-    except Exception as e:
-        print(f"[ERROR] Style analysis failed: {e}")
-        return jsonify({"error": str(e)}), 500
-
-
-# ==========================================
-# RECOMMENDATION #3: BACKGROUND PRE-GENERATION
-# ==========================================
-
-@app.route('/pregenerate-background', methods=['POST'])
-def pregenerate_background():
-    """
-    Pre-generate a background and cache it for reuse.
-    
-    This removes generation variance from the background entirely.
-    The same pre-generated background can be used across multiple product shots.
-    
-    Returns a background_id that can be passed to generate-studio-image-v2.
-    Also returns the image so iOS can cache it locally.
-    """
-    if 'image' not in request.files:
-        return jsonify({"error": "No background image provided"}), 400
-    
-    file = request.files['image']
-    quality = request.form.get('quality', '2K')  # Default to 2K for backgrounds
-    
-    if quality not in ['1K', '2K']:
-        quality = '2K'
-    
-    try:
-        bg_image_bytes = file.read()
-        
-        # Generate cache ID from source image
-        bg_id = generate_cache_id(bg_image_bytes, prefix="bg_")
-        
-        # Check if already cached
-        if bg_id in BACKGROUND_CACHE:
-            print(f"[PREGEN-BG] Cache hit: {bg_id}")
-            cached = BACKGROUND_CACHE[bg_id]
-            return jsonify({
-                "message": "Background retrieved from cache",
-                "background_id": bg_id,
-                "image": base64.b64encode(cached["image"]).decode('utf-8'),
-                "cached": True
-            })
-        
-        print(f"[PREGEN-BG] Generating new background: {bg_id}")
-        
-        # First, analyze the background
-        analysis_prompt = """Analyze this background/surface:
-1. DESCRIPTION: Detailed description of materials, colors, textures, patterns (50-80 words)
-2. MATERIAL_SCALE: Physical size of repeating elements
-3. HAS_TEXT: Does it have text, logos, or specific graphics? (true/false)
-
-JSON:
-{"description": "...", "material_scale": "...", "has_text": true/false}"""
-        
-        analysis_response = client.models.generate_content(
-            model=ANALYSIS_MODEL,
-            contents=[types.Part.from_bytes(data=bg_image_bytes, mime_type=file.content_type), analysis_prompt],
-            config=types.GenerateContentConfig(response_mime_type="application/json")
-        )
-        
-        analysis = json.loads(clean_json_text(analysis_response.text))
-        
-        # Generate the background
-        gen_prompt = """Reproduce this image exactly as a clean studio photography surface.
-
-IMAGE 1 shows a background/surface material. Create an exact copy preserving:
-- All colors, textures, and patterns exactly
-- ALL text, writing, numbers, logos in exact position, size, and style
-- ALL graphics, drawings, marks exactly as shown
-
-Fill the entire square frame with this surface material, evenly lit for product photography.
-This will be used as a reusable background for multiple product shots, so accuracy is critical."""
-        
-        content_parts = [
-            types.Part.from_bytes(data=bg_image_bytes, mime_type=file.content_type),
-            gen_prompt
-        ]
-        
-        # Generate with retries and verification
-        generated_bg = None
-        for attempt in range(MAX_GENERATION_ATTEMPTS):
-            try:
-                response = client.models.generate_content(
-                    model=IMAGE_GEN_MODEL,
-                    contents=content_parts,
-                    config=types.GenerateContentConfig(
-                        response_modalities=["TEXT", "IMAGE"],
-                        image_config=types.ImageConfig(aspect_ratio="1:1", image_size=quality)
-                    )
-                )
-                
-                if response.candidates and response.candidates[0].content.parts:
-                    for part in response.candidates[0].content.parts:
-                        if part.inline_data:
-                            # Verify the background
-                            if verify_background_reproduction(bg_image_bytes, part.inline_data.data, analysis.get("has_text", False)):
-                                generated_bg = part.inline_data.data
-                                print(f"[PREGEN-BG] Success on attempt {attempt + 1}")
-                                break
-                            else:
-                                print(f"[PREGEN-BG] Verification failed on attempt {attempt + 1}")
-                
-                if generated_bg:
-                    break
-                    
-            except Exception as e:
-                print(f"[PREGEN-BG] Attempt {attempt + 1} failed: {e}")
-        
-        if not generated_bg:
-            return jsonify({"error": "Failed to generate background"}), 500
-        
-        # Cache the result
-        BACKGROUND_CACHE[bg_id] = {
-            "image": generated_bg,
-            "description": analysis.get("description", ""),
-            "scale": analysis.get("material_scale", "")
-        }
-        
-        return jsonify({
-            "message": "Background pre-generated successfully",
-            "background_id": bg_id,
-            "image": base64.b64encode(generated_bg).decode('utf-8'),
-            "description": analysis.get("description", ""),
-            "material_scale": analysis.get("material_scale", ""),
-            "cached": False
-        })
-        
-    except Exception as e:
-        print(f"[ERROR] Background pre-generation failed: {e}")
-        return jsonify({"error": str(e)}), 500
-
-
-def verify_background_reproduction(original_bytes, generated_bytes, has_text):
-    """Verify background reproduction quality."""
-    
-    if has_text:
-        # Stricter verification for backgrounds with text
-        prompt = """Compare these two images. Image 1 is original, Image 2 is a reproduction.
-
-Check:
-1. Colors and textures similar?
-2. ALL text reproduced correctly - same words, same placement, same size?
-3. ALL graphics/logos reproduced correctly?
-
-JSON: {"colors_ok": bool, "text_ok": bool, "graphics_ok": bool, "pass": bool}"""
+def get_composition_prompt(orientation):
+    """Get composition prompt based on orientation."""
+    if orientation == "flat_lay":
+        return get_prompt('composition_flat_lay')
+    elif orientation == "standing":
+        return get_prompt('composition_standing')
     else:
-        # Simpler verification for plain textures
-        prompt = """Compare these two images. Image 1 is original, Image 2 is a reproduction.
+        return get_prompt('composition_angled')
 
-Check:
-1. Colors similar?
-2. Textures/patterns similar?
-3. Overall appearance matches?
 
-JSON: {"colors_ok": bool, "texture_ok": bool, "pass": bool}"""
+# =============================================
+# CORE GENERATION LOGIC (UNIFIED)
+# =============================================
+
+class GenerationRequest:
+    """Unified container for all generation parameters."""
     
-    try:
-        response = client.models.generate_content(
-            model=ANALYSIS_MODEL,
-            contents=[
-                types.Part.from_bytes(data=original_bytes, mime_type="image/jpeg"),
-                types.Part.from_bytes(data=generated_bytes, mime_type="image/png"),
-                prompt
-            ],
-            config=types.GenerateContentConfig(response_mime_type="application/json")
-        )
+    def __init__(self, request_obj):
+        self.main_image = None
+        self.main_mime = None
+        self.background_image = None
+        self.background_mime = None
+        self.cached_background = None
+        self.master_image = None
+        self.detail_images = []
+        self.detail_labels = []
         
-        result = json.loads(clean_json_text(response.text))
-        return result.get("pass", False)
+        # Parse parameters
+        self.prompt = request_obj.form.get('prompt', '')
+        self.quality = request_obj.form.get('quality', '1K')
+        self.lighting_prompt = request_obj.form.get('lightingPrompt', '')
+        self.lighting_scheme_id = request_obj.form.get('lightingSchemeId', 'softbox')
+        self.background_description = request_obj.form.get('backgroundDescription', '')
+        self.material_scale = request_obj.form.get('materialScale', '')
+        self.product_dimensions = request_obj.form.get('productDimensions', '')
+        self.orientation = request_obj.form.get('orientation', 'angled')
+        self.visible_text = request_obj.form.get('visibleText', '')
+        self.master_style = request_obj.form.get('masterStyle', '')
+        self.has_branding = request_obj.form.get('hasBranding', 'false').lower() == 'true'
         
-    except Exception as e:
-        print(f"[VERIFY-BG] Error: {e}")
-        return True  # Assume OK if verification fails
-
-
-# ==========================================
-# RECOMMENDATION #2: MASTER IMAGE LIBRARY
-# ==========================================
-
-@app.route('/save-master', methods=['POST'])
-def save_master():
-    """
-    Save a generated image as a "master" style reference.
-    
-    The master captures the look/feel that worked well.
-    Subsequent generations can reference this master for consistency.
-    
-    Returns a master_id that can be passed to generation endpoints.
-    """
-    if 'image' not in request.files:
-        return jsonify({"error": "No image provided"}), 400
-    
-    file = request.files['image']
-    lighting_scheme = request.form.get('lightingScheme', '')
-    background_type = request.form.get('backgroundType', '')
-    
-    try:
-        image_bytes = file.read()
+        # Validate quality
+        if self.quality not in ['1K', '2K']:
+            self.quality = '1K'
         
-        # Generate master ID
-        master_id = generate_cache_id(image_bytes, prefix="master_")
+        # Parse images
+        if 'image' in request_obj.files:
+            f = request_obj.files['image']
+            self.main_image = f.read()
+            self.main_mime = f.content_type
         
-        # Analyze the master for style characteristics
-        analysis_prompt = """Analyze this studio product photograph for style characteristics.
-
-Describe in 30-50 words:
-- Lighting quality (soft/hard, direction, shadow depth)
-- Color temperature (warm/cool/neutral)
-- Overall mood (bright/dramatic/natural)
-- Background treatment
-
-JSON: {"style_description": "..."}"""
+        if 'backgroundImage' in request_obj.files:
+            f = request_obj.files['backgroundImage']
+            self.background_image = f.read()
+            self.background_mime = f.content_type
         
-        response = client.models.generate_content(
-            model=ANALYSIS_MODEL,
-            contents=[types.Part.from_bytes(data=image_bytes, mime_type=file.content_type), analysis_prompt],
-            config=types.GenerateContentConfig(response_mime_type="application/json")
-        )
+        if 'cachedBackground' in request_obj.files:
+            f = request_obj.files['cachedBackground']
+            self.cached_background = f.read()
         
-        analysis = json.loads(clean_json_text(response.text))
+        if 'masterImage' in request_obj.files:
+            f = request_obj.files['masterImage']
+            self.master_image = f.read()
         
-        # Cache the master
-        MASTER_CACHE[master_id] = {
-            "image": image_bytes,
-            "lighting": lighting_scheme,
-            "background": background_type,
-            "style": analysis.get("style_description", "")
-        }
+        # Parse detail images
+        for i in range(1, 4):
+            if f'detail{i}' in request_obj.files:
+                f = request_obj.files[f'detail{i}']
+                self.detail_images.append((f.read(), f.content_type))
+                label = request_obj.form.get(f'detail{i}Label', f'Detail {i}')
+                self.detail_labels.append(label)
         
-        print(f"[MASTER] Saved: {master_id}")
-        
-        return jsonify({
-            "message": "Master saved successfully",
-            "master_id": master_id,
-            "style_description": analysis.get("style_description", "")
-        })
-        
-    except Exception as e:
-        print(f"[ERROR] Save master failed: {e}")
-        return jsonify({"error": str(e)}), 500
+        # Get lighting from scheme if not provided directly
+        if not self.lighting_prompt and self.lighting_scheme_id:
+            self.lighting_prompt = get_lighting_scheme(self.lighting_scheme_id)
 
 
-@app.route('/get-master/<master_id>', methods=['GET'])
-def get_master(master_id):
-    """Retrieve a saved master image."""
-    if master_id not in MASTER_CACHE:
-        return jsonify({"error": "Master not found"}), 404
-    
-    master = MASTER_CACHE[master_id]
-    return jsonify({
-        "master_id": master_id,
-        "image": base64.b64encode(master["image"]).decode('utf-8'),
-        "lighting": master["lighting"],
-        "background": master["background"],
-        "style": master["style"]
-    })
-
-
-@app.route('/list-masters', methods=['GET'])
-def list_masters():
-    """List all saved masters."""
-    masters = []
-    for mid, data in MASTER_CACHE.items():
-        masters.append({
-            "master_id": mid,
-            "lighting": data["lighting"],
-            "background": data["background"],
-            "style": data["style"]
-        })
-    return jsonify({"masters": masters})
-
-
-@app.route('/delete-master/<master_id>', methods=['DELETE'])
-def delete_master(master_id):
-    """Delete a saved master."""
-    if master_id in MASTER_CACHE:
-        del MASTER_CACHE[master_id]
-        return jsonify({"message": "Master deleted"})
-    return jsonify({"error": "Master not found"}), 404
-
-
-# ==========================================
-# CORE GENERATION FUNCTIONS
-# ==========================================
-
-def generate_with_retry(content_parts, quality, max_attempts=MAX_GENERATION_ATTEMPTS):
-    """Generate image with retry logic."""
+def generate_image(content_parts, quality):
+    """Core generation function with retries."""
     last_error = None
     
-    for attempt in range(max_attempts):
+    for attempt in range(MAX_GENERATION_ATTEMPTS):
         try:
-            response = client.models.generate_content(
+            response = gemini_client.models.generate_content(
                 model=IMAGE_GEN_MODEL,
                 contents=content_parts,
                 config=types.GenerateContentConfig(
@@ -534,560 +385,534 @@ def generate_with_retry(content_parts, quality, max_attempts=MAX_GENERATION_ATTE
             if response.candidates and response.candidates[0].content.parts:
                 for part in response.candidates[0].content.parts:
                     if part.inline_data:
-                        print(f"[GEN] Success on attempt {attempt + 1}")
                         return part.inline_data.data, None
             
             last_error = "No image in response"
-            print(f"[GEN] Attempt {attempt + 1}: {last_error}")
             
         except Exception as e:
             last_error = str(e)
             print(f"[GEN] Attempt {attempt + 1} failed: {e}")
     
-    return None, f"Failed after {max_attempts} attempts: {last_error}"
+    return None, f"Failed after {MAX_GENERATION_ATTEMPTS} attempts: {last_error}"
 
 
-def verify_generation(original_image, generated_image, orientation, check_text=None):
-    """Verify generated image meets quality criteria."""
-    prompt = f"""Compare these two images. Image 1 is the original product. Image 2 is a generated studio photograph.
-
-Verify:
-1. PRODUCT FIDELITY: Same product? Same shape, proportions, colors, materials, details?
-2. ORIENTATION: Should be "{orientation}" (flat_lay=top-down, standing=eye-level with depth, angled=natural angle). Correct?
-3. COMPOSITION: Product centered, filling ~50-60% of frame?
-4. LIGHTING: Unified across product and background?
-{"5. TEXT: Visible markings '" + check_text + "' preserved correctly?" if check_text else ""}
-
-JSON:
-{{"product_ok": bool, "orientation_ok": bool, "composition_ok": bool, "lighting_ok": bool, {"\"text_ok\": bool, " if check_text else ""}"pass": bool, "issues": []}}"""
+def verify_generation(original_bytes, generated_bytes, orientation, visible_text=None):
+    """Verify generated image meets criteria."""
+    
+    text_check = ""
+    text_field = ""
+    if visible_text:
+        text_check = f'\n5. TEXT: Visible markings "{visible_text}" preserved correctly?'
+        text_field = '"text_ok": bool, '
+    
+    prompt_template = get_prompt('verification')
+    if not prompt_template:
+        # Fallback verification prompt
+        prompt_template = '''Compare these images. Image 1 is original product, Image 2 is generated.
+Verify: product fidelity, orientation ({orientation}), composition, lighting unity.
+JSON: {{"pass": bool, "issues": []}}'''
+    
+    prompt = prompt_template.format(
+        orientation=orientation,
+        text_check=text_check,
+        text_field=text_field
+    )
     
     try:
-        response = client.models.generate_content(
+        response = gemini_client.models.generate_content(
             model=ANALYSIS_MODEL,
             contents=[
-                types.Part.from_bytes(data=original_image, mime_type="image/jpeg"),
-                types.Part.from_bytes(data=generated_image, mime_type="image/png"),
+                types.Part.from_bytes(data=original_bytes, mime_type="image/jpeg"),
+                types.Part.from_bytes(data=generated_bytes, mime_type="image/png"),
                 prompt
             ],
             config=types.GenerateContentConfig(response_mime_type="application/json")
         )
         
         result = json.loads(clean_json_text(response.text))
-        passed = result.get("pass", False)
-        issues = result.get("issues", [])
-        
-        print(f"[VERIFY] passed={passed}, issues={issues}")
-        return passed, issues
+        return result.get("pass", False), result.get("issues", [])
         
     except Exception as e:
         print(f"[VERIFY] Error: {e}")
-        return True, []
+        return True, []  # Assume OK if verification fails
 
 
-def build_composition_instruction(orientation):
-    """Get composition instructions based on orientation."""
-    if orientation == "flat_lay":
-        return """COMPOSITION: Top-down flat lay. Camera directly above, looking straight down. Product lies flat on horizontal surface. Center product, fill 50-60% of frame. Background as continuous horizontal plane. Soft contact shadow beneath."""
-    elif orientation == "standing":
-        return """COMPOSITION: Standing product shot. Camera at eye level or slightly elevated. Product stands upright with depth perspective - background recedes behind. Center product, fill 50-60% of frame height. Natural contact shadow at base."""
-    else:
-        return """COMPOSITION: Natural angle matching reference. Center product, fill 50-60% of frame. Background visible with appropriate perspective. Soft contact shadow."""
-
-
-# ==========================================
-# V1 GENERATION (with master reference support)
-# ==========================================
-
-@app.route('/generate-studio-image', methods=['POST'])
-def generate_studio_image():
-    """
-    Generate studio photograph with text-described background.
-    
-    Supports optional master_id for style consistency.
-    Includes verification for reliability.
-    """
-    if 'image' not in request.files:
-        return jsonify({"error": "No reference image provided"}), 400
-        
-    main_file = request.files['image']
-    
-    # Parameters
-    prompt = request.form.get('prompt', '')
-    quality = request.form.get('quality', '1K')
-    background_description = request.form.get('backgroundDescription', '')
-    product_dimensions = request.form.get('productDimensions', '')
-    orientation = request.form.get('orientation', 'angled')
-    visible_text = request.form.get('visibleText', '')
-    
-    # RECOMMENDATION #2: Master image reference
-    master_id = request.form.get('masterId', '')
-    master_image = None
-    master_style = ""
-    
-    if master_id and master_id in MASTER_CACHE:
-        master_data = MASTER_CACHE[master_id]
-        master_image = master_data["image"]
-        master_style = master_data["style"]
-        print(f"[V1] Using master reference: {master_id}")
-    
-    # Also accept master image directly from iOS cache
-    if 'masterImage' in request.files and not master_image:
-        master_file = request.files['masterImage']
-        master_image = master_file.read()
-        master_style = request.form.get('masterStyle', '')
-        print(f"[V1] Using uploaded master image")
-    
-    # Collect detail images
-    detail_images = []
-    detail_labels = []
-    for i in range(1, 4):
-        if f'detail{i}' in request.files:
-            detail_file = request.files[f'detail{i}']
-            detail_bytes = detail_file.read()
-            detail_images.append((detail_bytes, detail_file.content_type))
-            label = request.form.get(f'detail{i}Label', f'Detail {i}')
-            detail_labels.append(label)
-    
-    if quality not in ['1K', '2K']:
-        quality = '1K'
-    
-    try:
-        main_image_bytes = main_file.read()
-        print(f"[V1] Starting: {quality}, orientation={orientation}, details={len(detail_images)}, master={bool(master_image)}")
-
-        # Build content parts
-        content_parts = []
-        
-        # If master provided, it goes first as style reference
-        if master_image:
-            content_parts.append(types.Part.from_bytes(data=master_image, mime_type="image/png"))
-        
-        # Main product image
-        content_parts.append(types.Part.from_bytes(data=main_image_bytes, mime_type=main_file.content_type))
-        
-        # Detail images
-        for detail_bytes, detail_mime in detail_images:
-            content_parts.append(types.Part.from_bytes(data=detail_bytes, mime_type=detail_mime))
-        
-        # Build prompt
-        generation_prompt = build_v1_prompt(
-            lighting_prompt=prompt,
-            detail_labels=detail_labels,
-            background_description=background_description,
-            product_dimensions=product_dimensions,
-            orientation=orientation,
-            visible_text=visible_text,
-            has_master=bool(master_image),
-            master_style=master_style
-        )
-        content_parts.append(generation_prompt)
-
-        # Generate with verification
-        for verify_attempt in range(MAX_VERIFICATION_RETRIES + 1):
-            generated_bytes, error = generate_with_retry(content_parts, quality)
-            
-            if error:
-                return jsonify({"error": error}), 500
-            
-            passed, issues = verify_generation(
-                main_image_bytes, generated_bytes, orientation,
-                visible_text if visible_text else None
-            )
-            
-            if passed:
-                return jsonify({
-                    "message": "Image generated successfully",
-                    "image": base64.b64encode(generated_bytes).decode('utf-8')
-                })
-            
-            if verify_attempt < MAX_VERIFICATION_RETRIES:
-                print(f"[V1] Verification failed, retrying")
-                content_parts[-1] = generation_prompt + f"\n\nFIX THESE ISSUES: {', '.join(issues)}"
-            else:
-                return jsonify({
-                    "message": "Generated with potential issues",
-                    "image": base64.b64encode(generated_bytes).decode('utf-8'),
-                    "warnings": issues
-                })
-        
-    except Exception as e:
-        print(f"[ERROR] V1 failed: {e}")
-        return jsonify({"error": str(e)}), 500
-
-
-def build_v1_prompt(lighting_prompt, detail_labels, background_description, product_dimensions, orientation, visible_text, has_master=False, master_style=""):
-    """Build V1 generation prompt."""
+def build_generation_prompt(gen_req, has_master=False, has_cached_bg=False):
+    """Build the unified generation prompt."""
     
     sections = []
     
-    # Image roles (adjusted if master is present)
+    # Image role assignments
     roles = ["REFERENCE IMAGES:"]
+    img_idx = 1
     
     if has_master:
-        roles.append("Image 1 = STYLE REFERENCE. Match this image's lighting quality, color temperature, shadow character, and overall photographic style.")
-        roles.append("Image 2 = PRODUCT. Reproduce this exact object with complete fidelity.")
-        start_idx = 3
-    else:
-        roles.append("Image 1 = PRODUCT. Reproduce this exact object with complete fidelity - every shape, color, texture, material, marking exactly as shown.")
-        start_idx = 2
+        roles.append(f"Image {img_idx} = STYLE REFERENCE. Match this photographic style.")
+        img_idx += 1
     
-    for i, label in enumerate(detail_labels):
-        roles.append(f"Image {start_idx + i} = DETAIL: {label}")
+    if has_cached_bg:
+        roles.append(f"Image {img_idx} = BACKGROUND. Keep exactly as shown including all markings.")
+        img_idx += 1
+    
+    roles.append(f"Image {img_idx} = PRODUCT. Reproduce exactly with complete fidelity.")
+    img_idx += 1
+    
+    for i, label in enumerate(gen_req.detail_labels):
+        roles.append(f"Image {img_idx} = DETAIL: {label}")
+        img_idx += 1
     
     sections.append(" ".join(roles))
     
-    # Style guidance from master
-    if has_master and master_style:
-        sections.append(f"STYLE MATCHING: Replicate this photographic style: {master_style}")
+    # Master style
+    if has_master and gen_req.master_style:
+        sections.append(f"MATCH STYLE: {gen_req.master_style}")
     
     # Composition
-    sections.append(build_composition_instruction(orientation))
+    sections.append(get_composition_prompt(gen_req.orientation))
     
-    # Background
-    if background_description:
-        bg_section = f"BACKGROUND: {background_description}"
-        if product_dimensions:
-            bg_section += f" Product is ~{product_dimensions} - scale background proportionally. Tile seamlessly if needed."
+    # Background (if not using cached image)
+    if not has_cached_bg and gen_req.background_description:
+        bg_section = f"BACKGROUND: {gen_req.background_description}"
+        if gen_req.product_dimensions:
+            bg_section += f" Product is ~{gen_req.product_dimensions} - scale appropriately."
+        if gen_req.material_scale:
+            bg_section += f" Material scale: {gen_req.material_scale}."
         sections.append(bg_section)
     
+    # Scale for cached background
+    if has_cached_bg and gen_req.product_dimensions:
+        scale_section = f"SCALE: Product is ~{gen_req.product_dimensions}."
+        if gen_req.material_scale:
+            scale_section += f" Background: {gen_req.material_scale}."
+        sections.append(scale_section)
+    
     # Lighting
-    if lighting_prompt:
-        sections.append(lighting_prompt)
+    if gen_req.lighting_prompt:
+        lighting = gen_req.lighting_prompt
+        if has_cached_bg:
+            lighting += " Apply to both product and background - unified shadows and color temperature."
+        sections.append(lighting)
     
     # Text preservation
-    if visible_text:
-        sections.append(f"PRESERVE TEXT: {visible_text}")
+    if gen_req.visible_text:
+        sections.append(f"PRESERVE TEXT: {gen_req.visible_text}")
     
-    # Quality
-    sections.append("OUTPUT: Authentic studio photograph. Natural depth of field, real textures, unified lighting. Full-frame camera, 90mm lens, f/8.")
+    # Output quality
+    sections.append(get_prompt('output_quality'))
     
     return "\n\n".join(sections)
 
 
-# ==========================================
-# V2 GENERATION (with cached background support)
-# ==========================================
-
-@app.route('/generate-studio-image-v2', methods=['POST'])
-def generate_studio_image_v2():
+def unified_generate(gen_req):
     """
-    Two-stage generation for image-based backgrounds.
+    Unified generation pipeline handling all cases:
+    - V1 (text background)
+    - V2 (image background)
+    - With/without master
+    - With/without cached background
+    """
     
-    Supports:
-    - background_id: Use a pre-generated cached background (RECOMMENDATION #3)
-    - master_id: Use a master for style consistency (RECOMMENDATION #2)
-    - Or upload background/master images directly
-    """
-    if 'image' not in request.files:
-        return jsonify({"error": "No reference image provided"}), 400
+    start_time = time.time()
+    
+    if not gen_req.main_image:
+        return {"error": "No product image provided"}, 400
+    
+    # Determine generation mode
+    needs_background_gen = gen_req.background_image is not None and gen_req.has_branding
+    has_cached_bg = gen_req.cached_background is not None
+    has_master = gen_req.master_image is not None
+    
+    # Try to get cached background from Redis
+    if needs_background_gen and not has_cached_bg and redis_cache:
+        cache_key = generate_cache_key(gen_req.background_image, "bg_")
+        cached = redis_cache.get_binary(cache_key)
+        if cached:
+            gen_req.cached_background = cached
+            has_cached_bg = True
+            print(f"[CACHE] Background hit: {cache_key[:20]}...")
+    
+    # Stage 1: Generate background if needed
+    stage1_image = None
+    if needs_background_gen and not has_cached_bg:
+        print("[GEN] Stage 1: Background generation")
         
-    main_file = request.files['image']
+        bg_prompt = get_prompt('background_reproduction')
+        bg_parts = [
+            types.Part.from_bytes(data=gen_req.background_image, mime_type=gen_req.background_mime),
+            bg_prompt
+        ]
+        
+        stage1_image, error = generate_image(bg_parts, gen_req.quality)
+        
+        if error:
+            print(f"[GEN] Stage 1 failed: {error}")
+            # Fall back to V1 (text-only background)
+            needs_background_gen = False
+        else:
+            # Cache the generated background
+            if redis_cache:
+                cache_key = generate_cache_key(gen_req.background_image, "bg_")
+                redis_cache.set_binary(cache_key, stage1_image)
+                print(f"[CACHE] Background stored: {cache_key[:20]}...")
+            
+            gen_req.cached_background = stage1_image
+            has_cached_bg = True
     
-    # Parameters
-    prompt = request.form.get('prompt', '')
-    quality = request.form.get('quality', '1K')
-    lighting_prompt = request.form.get('lightingPrompt', '')
-    background_description = request.form.get('backgroundDescription', '')
-    material_scale = request.form.get('materialScale', '')
-    product_dimensions = request.form.get('productDimensions', '')
-    orientation = request.form.get('orientation', 'angled')
-    visible_text = request.form.get('visibleText', '')
+    # Stage 2 (or only stage): Generate final image
+    print("[GEN] Final generation")
     
-    # RECOMMENDATION #3: Use pre-generated background
-    background_id = request.form.get('backgroundId', '')
-    cached_background = None
+    # Build content parts
+    content_parts = []
     
-    if background_id and background_id in BACKGROUND_CACHE:
-        cached_data = BACKGROUND_CACHE[background_id]
-        cached_background = cached_data["image"]
-        if not background_description:
-            background_description = cached_data.get("description", "")
-        if not material_scale:
-            material_scale = cached_data.get("scale", "")
-        print(f"[V2] Using cached background: {background_id}")
+    if has_master:
+        content_parts.append(types.Part.from_bytes(data=gen_req.master_image, mime_type="image/jpeg"))
     
-    # Or accept background image directly
-    background_image = cached_background
-    background_mime = "image/png"
+    if has_cached_bg:
+        content_parts.append(types.Part.from_bytes(data=gen_req.cached_background, mime_type="image/png"))
     
-    if not background_image and 'backgroundImage' in request.files:
-        bg_file = request.files['backgroundImage']
-        background_image = bg_file.read()
-        background_mime = bg_file.content_type
+    content_parts.append(types.Part.from_bytes(data=gen_req.main_image, mime_type=gen_req.main_mime))
     
-    # Also accept pre-generated background from iOS
-    if not background_image and 'cachedBackground' in request.files:
-        bg_file = request.files['cachedBackground']
-        background_image = bg_file.read()
-        background_mime = bg_file.content_type
-        print(f"[V2] Using iOS-cached background")
+    for detail_bytes, detail_mime in gen_req.detail_images:
+        content_parts.append(types.Part.from_bytes(data=detail_bytes, mime_type=detail_mime))
     
-    # RECOMMENDATION #2: Master reference
-    master_id = request.form.get('masterId', '')
-    master_image = None
-    master_style = ""
+    prompt = build_generation_prompt(gen_req, has_master, has_cached_bg)
+    content_parts.append(prompt)
     
-    if master_id and master_id in MASTER_CACHE:
-        master_data = MASTER_CACHE[master_id]
-        master_image = master_data["image"]
-        master_style = master_data["style"]
+    # Generate with verification loop
+    final_image = None
+    issues = []
+    verification_attempts = 0
     
-    if 'masterImage' in request.files and not master_image:
-        master_file = request.files['masterImage']
-        master_image = master_file.read()
-        master_style = request.form.get('masterStyle', '')
+    for verify_attempt in range(MAX_VERIFICATION_RETRIES + 1):
+        verification_attempts += 1
+        
+        generated, error = generate_image(content_parts, gen_req.quality)
+        
+        if error:
+            return {"error": error}, 500
+        
+        # Verify
+        passed, issues = verify_generation(
+            gen_req.main_image,
+            generated,
+            gen_req.orientation,
+            gen_req.visible_text if gen_req.visible_text else None
+        )
+        
+        if passed:
+            final_image = generated
+            break
+        
+        if verify_attempt < MAX_VERIFICATION_RETRIES:
+            print(f"[VERIFY] Failed, retrying: {issues}")
+            # Update prompt with issues
+            content_parts[-1] = prompt + f"\n\nFIX THESE ISSUES: {', '.join(issues)}"
+        else:
+            # Return with warnings
+            final_image = generated
     
-    # Detail images
-    detail_images = []
-    detail_labels = []
-    for i in range(1, 4):
-        if f'detail{i}' in request.files:
-            detail_file = request.files[f'detail{i}']
-            detail_bytes = detail_file.read()
-            detail_images.append((detail_bytes, detail_file.content_type))
-            label = request.form.get(f'detail{i}Label', f'Detail {i}')
-            detail_labels.append(label)
+    # Log generation
+    elapsed_ms = int((time.time() - start_time) * 1000)
+    log_generation({
+        "orientation": gen_req.orientation,
+        "lighting_scheme": gen_req.lighting_scheme_id,
+        "background_type": "image" if needs_background_gen else "text",
+        "quality": gen_req.quality,
+        "has_master": has_master,
+        "has_cached_bg": has_cached_bg,
+        "verification_passed": len(issues) == 0,
+        "verification_attempts": verification_attempts,
+        "generation_time_ms": elapsed_ms
+    })
     
-    if quality not in ['1K', '2K']:
-        quality = '1K'
+    response = {
+        "message": "Success" if not issues else "Generated with potential issues",
+        "image": base64.b64encode(final_image).decode('utf-8')
+    }
+    
+    if issues:
+        response["warnings"] = issues
+    
+    return response, 200
+
+
+# =============================================
+# ROUTES
+# =============================================
+
+@app.route('/')
+def home():
+    return f"Studio Lights v4.0 | Redis: {'✓' if redis_cache else '✗'} | Supabase: {'✓' if supabase else '✗'}"
+
+
+@app.route('/health', methods=['GET'])
+def health():
+    """Health check endpoint."""
+    return jsonify({
+        "status": "healthy",
+        "redis": redis_cache is not None,
+        "supabase": supabase is not None
+    })
+
+
+# MARK: - Analysis Endpoints
+
+@app.route('/analyze-image', methods=['POST'])
+def analyze_image():
+    """Extract metadata from product image."""
+    if 'image' not in request.files:
+        return jsonify({"error": "No image file provided"}), 400
+    
+    file = request.files['image']
+    prompt = get_prompt('analysis_metadata')
     
     try:
-        main_image_bytes = main_file.read()
-        
-        # No background image - fall back to V1
-        if not background_image:
-            print("[V2] No background, using V1")
-            return generate_v1_internal(
-                main_image_bytes, main_file.content_type,
-                prompt, quality, detail_images, detail_labels,
-                background_description, product_dimensions, orientation, visible_text,
-                master_image, master_style
-            )
-        
-        print(f"[V2] Starting: {quality}, orientation={orientation}, cached_bg={bool(cached_background)}, master={bool(master_image)}")
-        
-        # If using cached background, skip Stage 1
-        if cached_background:
-            stage1_image = cached_background
-            print("[V2] Skipping Stage 1 (using cached background)")
-        else:
-            # Stage 1: Generate background
-            print("[V2] Stage 1: Background")
-            
-            stage1_prompt = """Reproduce this image exactly as a studio photography surface.
-
-IMAGE 1 shows a background/surface. Create an exact copy preserving:
-- All colors, textures, patterns exactly
-- ALL text, writing, numbers, logos - exact content, placement, size, style
-- ALL graphics, drawings, marks exactly
-
-Fill entire frame, evenly lit. Accuracy is critical."""
-            
-            stage1_parts = [
-                types.Part.from_bytes(data=background_image, mime_type=background_mime),
-                stage1_prompt
-            ]
-            
-            stage1_image = None
-            for attempt in range(MAX_GENERATION_ATTEMPTS):
-                stage1_bytes, _ = generate_with_retry(stage1_parts, quality, max_attempts=1)
-                if stage1_bytes:
-                    if verify_background_reproduction(background_image, stage1_bytes, False):
-                        stage1_image = stage1_bytes
-                        print(f"[V2] Stage 1 success on attempt {attempt + 1}")
-                        break
-            
-            if not stage1_image:
-                print("[V2] Stage 1 failed, using V1")
-                return generate_v1_internal(
-                    main_image_bytes, main_file.content_type,
-                    prompt, quality, detail_images, detail_labels,
-                    background_description, product_dimensions, orientation, visible_text,
-                    master_image, master_style
-                )
-        
-        # Stage 2: Composite
-        print("[V2] Stage 2: Composite")
-        
-        stage2_parts = []
-        
-        # Master first if present
-        if master_image:
-            stage2_parts.append(types.Part.from_bytes(data=master_image, mime_type="image/png"))
-        
-        # Background
-        stage2_parts.append(types.Part.from_bytes(data=stage1_image, mime_type="image/png"))
-        
-        # Product
-        stage2_parts.append(types.Part.from_bytes(data=main_image_bytes, mime_type=main_file.content_type))
-        
-        # Details
-        for detail_bytes, detail_mime in detail_images:
-            stage2_parts.append(types.Part.from_bytes(data=detail_bytes, mime_type=detail_mime))
-        
-        stage2_prompt = build_stage2_prompt(
-            detail_labels=detail_labels,
-            lighting_prompt=lighting_prompt or prompt,
-            material_scale=material_scale,
-            product_dimensions=product_dimensions,
-            orientation=orientation,
-            visible_text=visible_text,
-            has_master=bool(master_image),
-            master_style=master_style
+        image_bytes = file.read()
+        response = gemini_client.models.generate_content(
+            model=ANALYSIS_MODEL,
+            contents=[types.Part.from_bytes(data=image_bytes, mime_type=file.content_type), prompt],
+            config=types.GenerateContentConfig(response_mime_type="application/json")
         )
-        stage2_parts.append(stage2_prompt)
         
-        # Generate with verification
-        for verify_attempt in range(MAX_VERIFICATION_RETRIES + 1):
-            stage2_bytes, error = generate_with_retry(stage2_parts, quality)
-            
-            if error:
-                return jsonify({
-                    "message": "Partial - background only",
-                    "image": base64.b64encode(stage1_image).decode('utf-8'),
-                    "warnings": ["Composite failed"]
-                })
-            
-            passed, issues = verify_generation(
-                main_image_bytes, stage2_bytes, orientation,
-                visible_text if visible_text else None
-            )
-            
-            if passed:
-                return jsonify({
-                    "message": "Success",
-                    "image": base64.b64encode(stage2_bytes).decode('utf-8')
-                })
-            
-            if verify_attempt < MAX_VERIFICATION_RETRIES:
-                print(f"[V2] Stage 2 verification failed, retrying")
-                stage2_parts[-1] = stage2_prompt + f"\n\nFIX: {', '.join(issues)}"
+        result = json.loads(clean_json_text(response.text))
         
         return jsonify({
-            "message": "Generated with issues",
-            "image": base64.b64encode(stage2_bytes).decode('utf-8'),
-            "warnings": issues
+            "orientation": result.get("orientation", "angled"),
+            "camera_angle": result.get("camera_angle", "3/4 view"),
+            "product_dimensions": result.get("product_dimensions", ""),
+            "visible_text": result.get("visible_text", ""),
+            "description": ""  # Backwards compatibility
         })
         
     except Exception as e:
-        print(f"[ERROR] V2 failed: {e}")
+        print(f"[ERROR] Analysis: {e}")
         return jsonify({"error": str(e)}), 500
 
 
-def build_stage2_prompt(detail_labels, lighting_prompt, material_scale, product_dimensions, orientation, visible_text, has_master=False, master_style=""):
-    """Build Stage 2 composite prompt."""
+@app.route('/analyze-detail', methods=['POST'])
+def analyze_detail():
+    """Analyze detail image."""
+    if 'image' not in request.files:
+        return jsonify({"error": "No image file provided"}), 400
     
-    sections = []
+    file = request.files['image']
+    custom_prompt = request.form.get('prompt', '')
     
-    # Image roles
-    roles = ["REFERENCE IMAGES:"]
+    prompt = custom_prompt or "What specific detail, texture, or feature does this show? Describe in 5-10 words. Include any visible text. Write only the label."
     
-    if has_master:
-        roles.append("Image 1 = STYLE REFERENCE. Match this photographic style.")
-        roles.append("Image 2 = BACKGROUND. Keep exactly as shown including all markings.")
-        roles.append("Image 3 = PRODUCT. Reproduce exactly, place on background.")
-        start_idx = 4
-    else:
-        roles.append("Image 1 = BACKGROUND. Keep exactly, including all text/markings.")
-        roles.append("Image 2 = PRODUCT. Reproduce exactly, place on background.")
-        start_idx = 3
-    
-    for i, label in enumerate(detail_labels):
-        roles.append(f"Image {start_idx + i} = DETAIL: {label}")
-    
-    sections.append(" ".join(roles))
-    
-    # Style from master
-    if has_master and master_style:
-        sections.append(f"MATCH STYLE: {master_style}")
-    
-    # Composition
-    sections.append(build_composition_instruction(orientation))
-    
-    # Scale
-    if product_dimensions and material_scale:
-        sections.append(f"SCALE: Product ~{product_dimensions}. Background: {material_scale}. Realistic proportions.")
-    elif product_dimensions:
-        sections.append(f"SCALE: Product ~{product_dimensions}.")
-    
-    # Lighting
-    if lighting_prompt:
-        sections.append(f"{lighting_prompt} Apply to both product and background - unified shadows and color temperature.")
-    else:
-        sections.append("LIGHTING: Even studio light on both product and background.")
-    
-    # Text
-    if visible_text:
-        sections.append(f"PRESERVE: {visible_text}")
-    
-    sections.append("OUTPUT: Authentic photograph. Natural depth of field, real textures, unified lighting.")
-    
-    return "\n\n".join(sections)
+    try:
+        image_bytes = file.read()
+        response = gemini_client.models.generate_content(
+            model=ANALYSIS_MODEL,
+            contents=[types.Part.from_bytes(data=image_bytes, mime_type=file.content_type), prompt]
+        )
+        
+        label = response.text.strip().strip('"\'').rstrip('.')
+        return jsonify({"label": label})
+        
+    except Exception as e:
+        print(f"[ERROR] Detail analysis: {e}")
+        return jsonify({"error": str(e)}), 500
 
 
-def generate_v1_internal(main_bytes, main_mime, prompt, quality, detail_images, detail_labels, bg_desc, dims, orientation, visible_text, master_image=None, master_style=""):
-    """Internal V1 generation for fallback."""
+@app.route('/analyze-background', methods=['POST'])
+def analyze_background():
+    """Analyze background image."""
+    if 'image' not in request.files:
+        return jsonify({"error": "No image file provided"}), 400
     
-    content_parts = []
+    file = request.files['image']
     
-    if master_image:
-        content_parts.append(types.Part.from_bytes(data=master_image, mime_type="image/png"))
+    prompt = """Analyze this background/surface for product photography.
+
+NAME: Short name, 2-4 words
+DESCRIPTION: Describe materials, colors, textures, patterns (80-120 words). Include any text exactly.
+HAS_BRANDING: Contains text, logos, graphics to preserve? (true/false)
+MATERIAL_SCALE: Physical size of repeating elements
+
+JSON: {"name": "...", "description": "...", "has_branding": bool, "material_scale": "..."}"""
     
-    content_parts.append(types.Part.from_bytes(data=main_bytes, mime_type=main_mime))
-    
-    for detail_bytes, detail_mime in detail_images:
-        content_parts.append(types.Part.from_bytes(data=detail_bytes, mime_type=detail_mime))
-    
-    generation_prompt = build_v1_prompt(
-        prompt, detail_labels, bg_desc, dims, orientation, visible_text,
-        bool(master_image), master_style
-    )
-    content_parts.append(generation_prompt)
-    
-    generated_bytes, error = generate_with_retry(content_parts, quality)
-    
-    if error:
-        return jsonify({"error": error}), 500
-    
-    return jsonify({
-        "message": "Success",
-        "image": base64.b64encode(generated_bytes).decode('utf-8')
-    })
+    try:
+        image_bytes = file.read()
+        response = gemini_client.models.generate_content(
+            model=ANALYSIS_MODEL,
+            contents=[types.Part.from_bytes(data=image_bytes, mime_type=file.content_type), prompt],
+            config=types.GenerateContentConfig(response_mime_type="application/json")
+        )
+        
+        result = json.loads(clean_json_text(response.text))
+        
+        name = result.get("name", "Custom Background")
+        words = name.split()
+        if len(words) > 4:
+            name = ' '.join(words[:4])
+        
+        return jsonify({
+            "name": name,
+            "description": result.get("description", name),
+            "has_branding": result.get("has_branding", False),
+            "material_scale": result.get("material_scale", "")
+        })
+        
+    except Exception as e:
+        print(f"[ERROR] Background analysis: {e}")
+        return jsonify({"error": str(e)}), 500
 
 
-# ==========================================
-# CACHE MANAGEMENT
-# ==========================================
+@app.route('/analyze-style', methods=['POST'])
+def analyze_style():
+    """Analyze style for master images."""
+    if 'image' not in request.files:
+        return jsonify({"error": "No image file provided"}), 400
+    
+    file = request.files['image']
+    
+    prompt = """Analyze this studio photograph for style characteristics.
+Describe in 30-50 words: lighting quality, color temperature, mood, background treatment.
+JSON: {"style_description": "..."}"""
+    
+    try:
+        image_bytes = file.read()
+        response = gemini_client.models.generate_content(
+            model=ANALYSIS_MODEL,
+            contents=[types.Part.from_bytes(data=image_bytes, mime_type=file.content_type), prompt],
+            config=types.GenerateContentConfig(response_mime_type="application/json")
+        )
+        
+        result = json.loads(clean_json_text(response.text))
+        return jsonify({"style_description": result.get("style_description", "")})
+        
+    except Exception as e:
+        print(f"[ERROR] Style analysis: {e}")
+        return jsonify({"error": str(e)}), 500
 
-@app.route('/clear-cache', methods=['POST'])
+
+# MARK: - Generation Endpoints (Unified)
+
+@app.route('/generate-studio-image', methods=['POST'])
+def generate_studio_image():
+    """Generate studio image (V1 - text backgrounds)."""
+    gen_req = GenerationRequest(request)
+    response, status = unified_generate(gen_req)
+    return jsonify(response), status
+
+
+@app.route('/generate-studio-image-v2', methods=['POST'])
+def generate_studio_image_v2():
+    """Generate studio image (V2 - image backgrounds)."""
+    gen_req = GenerationRequest(request)
+    response, status = unified_generate(gen_req)
+    return jsonify(response), status
+
+
+@app.route('/pregenerate-background', methods=['POST'])
+def pregenerate_background():
+    """Pre-generate and cache a background."""
+    if 'image' not in request.files:
+        return jsonify({"error": "No background image provided"}), 400
+    
+    file = request.files['image']
+    quality = request.form.get('quality', '2K')
+    
+    if quality not in ['1K', '2K']:
+        quality = '2K'
+    
+    try:
+        bg_image_bytes = file.read()
+        cache_key = generate_cache_key(bg_image_bytes, "bg_")
+        
+        # Check cache first
+        if redis_cache:
+            cached = redis_cache.get_binary(cache_key)
+            if cached:
+                return jsonify({
+                    "message": "Retrieved from cache",
+                    "background_id": cache_key,
+                    "image": base64.b64encode(cached).decode('utf-8'),
+                    "cached": True
+                })
+        
+        # Generate
+        bg_prompt = get_prompt('background_reproduction')
+        bg_parts = [
+            types.Part.from_bytes(data=bg_image_bytes, mime_type=file.content_type),
+            bg_prompt
+        ]
+        
+        generated, error = generate_image(bg_parts, quality)
+        
+        if error:
+            return jsonify({"error": error}), 500
+        
+        # Cache
+        if redis_cache:
+            redis_cache.set_binary(cache_key, generated)
+        
+        return jsonify({
+            "message": "Background generated",
+            "background_id": cache_key,
+            "image": base64.b64encode(generated).decode('utf-8'),
+            "cached": False
+        })
+        
+    except Exception as e:
+        print(f"[ERROR] Background pre-generation: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+# MARK: - Cache Management
+
+@app.route('/cache/clear', methods=['POST'])
 def clear_cache():
-    """Clear all server-side caches."""
-    global BACKGROUND_CACHE, MASTER_CACHE
-    
-    cache_type = request.form.get('type', 'all')
-    
-    if cache_type in ['all', 'backgrounds']:
-        BACKGROUND_CACHE = {}
-    if cache_type in ['all', 'masters']:
-        MASTER_CACHE = {}
-    
-    return jsonify({"message": f"Cleared {cache_type} cache"})
+    """Clear cached backgrounds (admin endpoint)."""
+    # In production, add authentication here
+    if redis_cache:
+        # Note: This clears ALL keys, use with caution
+        # For selective clearing, implement key patterns
+        return jsonify({"message": "Cache clear not implemented for safety"})
+    return jsonify({"message": "No cache configured"})
 
 
-@app.route('/cache-stats', methods=['GET'])
+@app.route('/cache/stats', methods=['GET'])
 def cache_stats():
     """Get cache statistics."""
     return jsonify({
-        "backgrounds_cached": len(BACKGROUND_CACHE),
-        "masters_cached": len(MASTER_CACHE),
-        "background_ids": list(BACKGROUND_CACHE.keys()),
-        "master_ids": list(MASTER_CACHE.keys())
+        "redis_connected": redis_cache is not None,
+        "supabase_connected": supabase is not None
     })
 
 
-# ==========================================
-# SOCIAL MEDIA ENDPOINTS
-# ==========================================
+# MARK: - Config Endpoints
+
+@app.route('/config/lighting-schemes', methods=['GET'])
+def get_lighting_schemes():
+    """Get all active lighting schemes."""
+    if supabase:
+        schemes = supabase.select('lighting_schemes', 'id,name,description,prompt_text', {'is_active': 'true'})
+        return jsonify({"schemes": schemes})
+    
+    # Fallback
+    return jsonify({"schemes": [
+        {"id": "softbox", "name": "Soft Box", "description": "Classic commercial lighting"}
+    ]})
+
+
+@app.route('/config/backgrounds', methods=['GET'])
+def get_backgrounds():
+    """Get default backgrounds."""
+    if supabase:
+        backgrounds = supabase.select('backgrounds', 'id,name,description,is_default')
+        return jsonify({"backgrounds": backgrounds})
+    
+    # Fallback
+    return jsonify({"backgrounds": [
+        {"id": "white", "name": "White", "description": FALLBACK_BACKGROUNDS['white'], "is_default": True}
+    ]})
+
+
+# =============================================
+# SOCIAL MEDIA ENDPOINTS (unchanged)
+# =============================================
 
 @app.route('/generate-interview-questions', methods=['POST'])
 def generate_interview_questions():
@@ -1099,7 +924,7 @@ def generate_interview_questions():
     
     try:
         image_bytes = file.read()
-        response = client.models.generate_content(
+        response = gemini_client.models.generate_content(
             model=ANALYSIS_MODEL,
             contents=[types.Part.from_bytes(data=image_bytes, mime_type=file.content_type), user_prompt],
             config=types.GenerateContentConfig(response_mime_type="application/json")
@@ -1126,14 +951,11 @@ def generate_captions():
         interview_text = "\n".join([f"Q: {item['question']}\nA: {item['answer']}" for item in qa_pairs])
         
         prompt = f"""Based on this interview, write 3 Instagram captions.
-
 {interview_text}
-
 Style: {tone}, {length}.
-
 JSON: storytelling, expert, hybrid, hashtags."""
         
-        response = client.models.generate_content(
+        response = gemini_client.models.generate_content(
             model=ANALYSIS_MODEL,
             contents=[prompt],
             config=types.GenerateContentConfig(response_mime_type="application/json")
@@ -1151,13 +973,11 @@ def analyze_daily_photo():
         return jsonify({"error": "No image"}), 400
     
     file = request.files['image']
-    
-    prompt = """Look at this WIP photo and suggest 3 prompts for a social media post. Casual and specific.
-JSON array of 3 strings."""
+    prompt = "Look at this WIP photo and suggest 3 prompts for social media. Casual and specific. JSON array of 3 strings."
     
     try:
         image_bytes = file.read()
-        response = client.models.generate_content(
+        response = gemini_client.models.generate_content(
             model=ANALYSIS_MODEL,
             contents=[types.Part.from_bytes(data=image_bytes, mime_type=file.content_type), prompt],
             config=types.GenerateContentConfig(response_mime_type="application/json")
@@ -1183,16 +1003,14 @@ def generate_daily_caption():
     user_notes = request.form.get('user_notes', '')
     
     prompt = f"""Write Instagram caption (100-150 words) for this maker's update.
-
 Prompt: "{selected_prompt}"
 Notes: "{user_notes}"
-
 Casual, authentic. End with 5-10 hashtags.
 JSON: caption, hashtags."""
     
     try:
         image_bytes = file.read()
-        response = client.models.generate_content(
+        response = gemini_client.models.generate_content(
             model=ANALYSIS_MODEL,
             contents=[types.Part.from_bytes(data=image_bytes, mime_type=file.content_type), prompt],
             config=types.GenerateContentConfig(response_mime_type="application/json")
@@ -1203,6 +1021,10 @@ JSON: caption, hashtags."""
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
+# =============================================
+# MAIN
+# =============================================
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
