@@ -491,8 +491,10 @@ def generate_studio_image_v2():
     The insight: Products reproduce well because they're the primary focus.
     So let's make the background the primary focus first, then add the product.
     
-    Stage 1: Reproduce the background EXACTLY (like a product photo of the surface)
-    Stage 2: Add the product onto that reproduced background
+    Stage 1: 
+      - If has_branding: Reproduce the background EXACTLY (preserve text/logos)
+      - If no branding: Use image as STYLE REFERENCE, generate at proper scale
+    Stage 2: Add the product onto that background
     """
     if 'image' not in request.files:
         return jsonify({"error": "No reference image provided"}), 400
@@ -504,6 +506,7 @@ def generate_studio_image_v2():
     background_description = request.form.get('backgroundDescription', '')
     material_scale = request.form.get('materialScale', '')
     product_dimensions = request.form.get('productDimensions', '')
+    has_branding = request.form.get('hasBranding', 'false').lower() == 'true'
     
     # Background image - this time we USE it
     background_image = None
@@ -519,6 +522,7 @@ def generate_studio_image_v2():
         print(f"--- V2: Material scale: {material_scale} ---")
     if product_dimensions:
         print(f"--- V2: Product dimensions: {product_dimensions} ---")
+    print(f"--- V2: Has branding: {has_branding} ---")
     
     # Get detail images
     detail_images = []
@@ -553,15 +557,16 @@ def generate_studio_image_v2():
         print(f"--- V2 Background-First Generation: {quality} ---")
         
         # ==========================================
-        # STAGE 1: Reproduce background EXACTLY
+        # STAGE 1: Generate background
         # ==========================================
-        print("--- Stage 1: Reproducing background exactly ---")
         
         stage1_parts = []
-        # Background image is THE ONLY image - treat it like a product
         stage1_parts.append(types.Part.from_bytes(data=background_image, mime_type=background_mime))
         
-        stage1_prompt = """Recreate this image EXACTLY as a studio photograph.
+        if has_branding:
+            # EXACT reproduction - preserve text, logos, branding
+            print("--- Stage 1: Reproducing background EXACTLY (has branding) ---")
+            stage1_prompt = """Recreate this image EXACTLY as a studio photograph.
 
 IMAGE 1: Reference image to reproduce with PERFECT FIDELITY.
 
@@ -575,6 +580,34 @@ TASK: Create an EXACT reproduction of this image.
 OUTPUT: A perfect reproduction of the reference image, as if photographed in a studio with clean, even lighting.
 
 CRITICAL: Reproduce EVERYTHING in the image exactly. Every mark, every line, every detail."""
+        else:
+            # STYLE REFERENCE - use as inspiration, generate fresh at proper scale
+            print("--- Stage 1: Using background as STYLE REFERENCE (no branding) ---")
+            
+            scale_instruction = ""
+            if material_scale:
+                scale_instruction = f"\n\nMATERIAL SCALE: {material_scale}\nGenerate the material at this real-world scale."
+            if product_dimensions:
+                scale_instruction += f"\n\nThis background will be used with a product of dimensions: {product_dimensions}\nScale the material pattern appropriately - if the pattern is smaller than the product, tile/repeat it seamlessly."
+            
+            stage1_prompt = f"""Use this image as a STYLE REFERENCE to generate a professional studio backdrop.
+
+IMAGE 1: Style reference showing the material, texture, and color to match.
+
+TASK: Generate a NEW studio backdrop surface inspired by this reference.
+- Match the MATERIAL TYPE (wood, fabric, paper, concrete, etc.)
+- Match the COLOR and TONE precisely
+- Match the TEXTURE and SURFACE QUALITY
+- Match the overall MOOD and FEEL
+
+DO NOT reproduce this exact image. Instead, generate a FRESH version of this type of material that:
+- Looks like a professional studio backdrop
+- Has clean, even studio lighting
+- Extends seamlessly to fill the frame
+- Has realistic material texture at proper scale
+- Could be tiled/repeated if needed{scale_instruction}
+
+OUTPUT: A professional studio backdrop surface that matches the style, material, and color of the reference, but generated fresh with proper scaling for product photography."""
         
         stage1_parts.append(stage1_prompt)
         
