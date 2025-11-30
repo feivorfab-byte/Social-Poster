@@ -41,20 +41,43 @@ def home():
 
 @app.route('/analyze-image', methods=['POST'])
 def analyze_image():
-    """Analyze main reference image to get detailed description."""
+    """Analyze main reference image to get detailed description and camera angle."""
     if 'image' not in request.files:
         return jsonify({"error": "No image file provided"}), 400
     
     file = request.files['image']
-    prompt = request.form.get('prompt', 'Describe this image in detail.')
+    
+    prompt = """
+    Analyze this product photograph and provide TWO things:
+    
+    1. DESCRIPTION: A concise, highly specific physical description of the object shown. 
+       Focus on geometry, shape, materials, surface textures, and colors. 
+       Include any support structure if visible. Do NOT describe background or lighting.
+    
+    2. CAMERA_ANGLE: Describe the camera's perspective/angle in a short phrase.
+       Examples: "top-down flat lay", "3/4 view from above-left", "straight-on front view", 
+       "low angle looking up", "eye-level 3/4 view", "overhead slightly angled"
+    
+    Output as JSON:
+    {"description": "Object description...", "camera_angle": "angle description"}
+    """
     
     try:
         image_bytes = file.read()
         response = client.models.generate_content(
             model=ANALYSIS_MODEL,
-            contents=[types.Part.from_bytes(data=image_bytes, mime_type=file.content_type), prompt]
+            contents=[types.Part.from_bytes(data=image_bytes, mime_type=file.content_type), prompt],
+            config=types.GenerateContentConfig(response_mime_type="application/json")
         )
-        return jsonify({"description": response.text})
+        
+        result = json.loads(clean_json_text(response.text))
+        description = result.get("description", "")
+        camera_angle = result.get("camera_angle", "3/4 view")
+        
+        return jsonify({
+            "description": description,
+            "camera_angle": camera_angle
+        })
     except Exception as e:
         print(f"!!!!!!!!!!!!!! ANALYSIS ERROR: {e}")
         return jsonify({"error": str(e)}), 500
@@ -91,21 +114,51 @@ def analyze_detail():
 
 @app.route('/analyze-background', methods=['POST'])
 def analyze_background():
-    """Analyze a background image and return both a short name and detailed description."""
+    """Analyze a background image and return both a short name and highly detailed description."""
     if 'image' not in request.files:
         return jsonify({"error": "No image file provided"}), 400
     
     file = request.files['image']
     
     prompt = """
-    Look at this image and analyze the background/surface shown.
+    Analyze this surface/material image in extreme detail for use as a studio photography backdrop.
     
     Provide TWO things:
-    1. NAME: A short 2-4 word name for this background (e.g., "Red Brick Wall", "Rustic Oak Wood", "White Marble")
-    2. DESCRIPTION: A detailed description (20-40 words) of the material, texture, color, and characteristics that would help recreate this as a studio backdrop. Focus on: material type, color tones, texture, patterns, weathering, finish.
+    
+    1. NAME: A short 2-4 word descriptive name (e.g., "Weathered Red Brick", "Dark Walnut Wood", "Carrara Marble")
+    
+    2. DESCRIPTION: A comprehensive, highly specific description (80-120 words) that would allow an AI to accurately recreate this exact surface. Include ALL of the following:
+    
+    MATERIAL: Primary material type and composition
+    
+    COLOR PALETTE: 
+    - Dominant color with specific tone (e.g., "warm terracotta red with orange undertones")
+    - Secondary colors and accent colors
+    - Color variation patterns (mottled, streaked, uniform, gradient)
+    
+    TEXTURE:
+    - Surface feel (rough, smooth, grainy, porous, polished)
+    - Texture depth (shallow scratches, deep grooves, raised patterns)
+    - Tactile qualities
+    
+    PATTERN:
+    - Pattern type (grain direction, tile layout, organic shapes, geometric)
+    - Pattern scale (fine grain, large format, varied sizes)
+    - Repeat characteristics (regular, irregular, random)
+    
+    SURFACE FINISH:
+    - Reflectivity (matte, satin, semi-gloss, high-gloss)
+    - How light interacts with the surface
+    
+    CONDITION/CHARACTER:
+    - Age indicators (new, weathered, distressed, vintage)
+    - Wear patterns, patina, or unique characteristics
+    - Any grout, mortar, joints, or seams
+    
+    Be extremely specific with colors - use descriptive terms like "dusty rose", "charcoal gray with blue undertones", "honey gold", "slate blue-gray" rather than generic color names.
     
     Output as JSON:
-    {"name": "Short Name", "description": "Detailed description..."}
+    {"name": "Short Name", "description": "Comprehensive detailed description..."}
     """
     
     try:
@@ -140,11 +193,11 @@ def generate_studio_image():
     Generate studio image using Gemini 3 Pro with multi-reference support.
     
     Implements best practices from Gemini 3 Pro documentation:
-    - Explicit image labeling in prompts
+    - Indexed image labeling (Image 1, Image 2, etc.)
     - Main reference first, details in sequence
     - Preservation language for critical features
     - Single-source-of-truth master image approach
-    - Optional background reference image for brand consistency
+    - Background via TEXT DESCRIPTION only (not image) for consistency
     """
     if 'image' not in request.files:
         return jsonify({"error": "No reference image provided"}), 400
@@ -153,14 +206,8 @@ def generate_studio_image():
     prompt = request.form.get('prompt', 'Turn this into a studio photograph.')
     quality = request.form.get('quality', '1K')
     
-    # Check for background reference image
-    background_image = None
-    background_mime = None
-    if 'backgroundImage' in request.files:
-        bg_file = request.files['backgroundImage']
-        background_image = bg_file.read()
-        background_mime = bg_file.content_type
-        print(f"--- Background reference image received: {len(background_image)} bytes ---")
+    # Background is now description-only (no image sent)
+    background_description = request.form.get('backgroundDescription', '')
     
     # Get detail images (up to 3)
     detail_images = []
@@ -168,15 +215,13 @@ def generate_studio_image():
     
     for i in range(1, 4):  # detail1, detail2, detail3
         detail_key = f'detail{i}'
-        # Support both label key formats
-        label_key = f'detail{i}Label'  # iOS sends this
-        label_key_alt = f'detail{i}_label'  # Alternative format
+        label_key = f'detail{i}Label'
+        label_key_alt = f'detail{i}_label'
         
         if detail_key in request.files:
             detail_file = request.files[detail_key]
             detail_bytes = detail_file.read()
             detail_images.append((detail_bytes, detail_file.content_type))
-            # Try both label key formats
             label = request.form.get(label_key) or request.form.get(label_key_alt) or f'Detail {i}'
             detail_labels.append(label)
     
@@ -186,27 +231,22 @@ def generate_studio_image():
     
     try:
         main_image_bytes = main_file.read()
-        has_bg = background_image is not None
-        print(f"--- Generating {quality} image with {len(detail_images)} detail ref(s), background ref: {has_bg} ---")
+        has_bg_desc = bool(background_description)
+        print(f"--- Generating {quality} image with {len(detail_images)} detail ref(s) ---")
+        print(f"--- Background description: {background_description[:100] if background_description else 'None'}... ---")
         print(f"--- Prompt snippet: {prompt[:150]}... ---")
 
-        # Build content parts with explicit labeling per Gemini 3 Pro best practices
-        # Order: Main reference first (establishes subject), then background, then details
-        content_parts = []
-        
+        # Build content parts with indexed labeling per Gemini 3 Pro best practices
         # Image 1: Main reference (master image - single source of truth)
+        content_parts = []
         content_parts.append(types.Part.from_bytes(data=main_image_bytes, mime_type=main_file.content_type))
         
-        # Image 2 (optional): Background reference
-        if background_image:
-            content_parts.append(types.Part.from_bytes(data=background_image, mime_type=background_mime))
-        
-        # Add detail images in sequence
+        # Add detail images in sequence (Image 2, 3, 4...)
         for detail_bytes, detail_mime in detail_images:
             content_parts.append(types.Part.from_bytes(data=detail_bytes, mime_type=detail_mime))
         
-        # Build the explicitly labeled prompt
-        labeled_prompt = build_labeled_prompt(prompt, detail_labels, has_background=has_bg)
+        # Build the indexed labeled prompt
+        labeled_prompt = build_labeled_prompt(prompt, detail_labels, background_description)
         content_parts.append(labeled_prompt)
 
         # Retry logic - try up to 3 times
@@ -256,59 +296,74 @@ def generate_studio_image():
         return jsonify({"error": str(e)}), 500
 
 
-def build_labeled_prompt(base_prompt, detail_labels, has_background=False):
+def build_labeled_prompt(base_prompt, detail_labels, background_description=""):
     """
-    Build an explicitly labeled prompt for studio product photography.
+    Build an indexed labeled prompt for studio product photography.
+    
+    Following Gemini 3 Pro best practices:
+    - Indexed image labeling (Image 1, Image 2, etc.)
+    - Single source of truth (master image)
+    - Background via text description (not image) for consistency
+    - Explicit preservation language
     
     Image order:
-    - Image 1: Main product reference
-    - Image 2: Background/surface material sample (if provided)
-    - Image 3+: Detail references
+    - Image 1: Main product reference (master)
+    - Image 2+: Detail references
     """
     lines = []
     
-    # Label images
+    # Indexed image labeling
     lines.append("IMAGE REFERENCES:")
-    lines.append("- Image 1: Product reference (recreate this exact object)")
+    lines.append("Image 1: Master product reference - this is the EXACT object to recreate. Preserve its shape, proportions, colors, materials, and all visible details with high fidelity.")
     
     next_idx = 2
-    
-    if has_background:
-        lines.append(f"- Image {next_idx}: Surface MATERIAL SAMPLE (extract texture, color, pattern only)")
-        next_idx += 1
-    
     for i, label in enumerate(detail_labels):
-        lines.append(f"- Image {next_idx}: {label} (detail reference)")
+        lines.append(f"Image {next_idx}: Close-up detail reference showing '{label}' - use this for accurate texture/detail in this area.")
         next_idx += 1
     
     lines.append("")
-    lines.append("TASK:")
+    lines.append("=" * 50)
+    lines.append("TASK: Professional Studio Product Photography")
+    lines.append("=" * 50)
+    lines.append("")
     lines.append(base_prompt)
     
-    if has_background:
-        lines.append("")
-        lines.append("SCENE SETUP:")
-        lines.append("- TOP-DOWN camera angle, looking straight down at the product")
-        lines.append("- Product rests on a flat horizontal surface")
-        lines.append("- Surface material: Match the texture, color, and pattern from Image 2")
-        lines.append("- Generate fresh surface - do NOT composite or copy Image 2 directly")
-        lines.append("")
-        lines.append("CRITICAL - UNIFIED LIGHTING:")
-        lines.append("The product and surface must appear lit by the SAME light source(s).")
-        lines.append("- Light direction: Identical on both product and surface")
-        lines.append("- Highlights: Surface shows highlights/hotspots matching the product's lit areas") 
-        lines.append("- Shadows on surface: Must match the light direction hitting the product")
-        lines.append("- Contact shadow: Soft shadow where product meets surface, darkest at contact point, fading outward")
-        lines.append("- Color bleed: Subtle reflected color from surface onto product's underside/edges")
-        lines.append("- The surface texture should be revealed by the lighting (not flat/even)")
-        lines.append("")
-        lines.append("This must look like ONE photograph, not a product pasted onto a background.")
-    
+    # Background handling - detailed description for consistent reproduction
     lines.append("")
-    lines.append("Recreate the exact object from Image 1 with high detail and accuracy.")
+    if background_description:
+        lines.append("BACKGROUND SURFACE SPECIFICATION:")
+        lines.append("Generate a studio backdrop surface that EXACTLY matches the following detailed material description.")
+        lines.append("Use EVERY detail provided - colors, textures, patterns, finish, and characteristics.")
+        lines.append("")
+        lines.append(f"MATERIAL DESCRIPTION: {background_description}")
+        lines.append("")
+        lines.append("Reproduce this surface with high fidelity to the description above.")
+        lines.append("")
     
+    # Core requirements
+    lines.append("CRITICAL REQUIREMENTS:")
+    lines.append("")
+    lines.append("1. OBJECT FIDELITY")
+    lines.append("   - Recreate the EXACT object from Image 1")
+    lines.append("   - Match all proportions, shapes, colors, and materials precisely")
+    lines.append("   - This is a recreation, not a modification - preserve everything")
     if detail_labels:
-        lines.append("Use detail reference images for accurate textures and fine details.")
+        lines.append("   - Use detail reference images to ensure accurate fine details and textures")
+    lines.append("")
+    
+    lines.append("2. UNIFIED LIGHTING")
+    lines.append("   - Product and background must share the SAME light source(s)")
+    lines.append("   - Light direction must be consistent across entire image")
+    lines.append("   - Background surface shows highlights and shadows matching the product")
+    lines.append("   - Natural contact shadow where product meets surface (soft, darkest at contact)")
+    lines.append("   - Subtle color spill from background onto product edges")
+    lines.append("")
+    
+    lines.append("3. PHOTOGRAPHIC QUALITY")
+    lines.append("   - Result must look like a single photograph, not a composite")
+    lines.append("   - Professional studio photography aesthetic")
+    lines.append("   - Sharp focus on product, natural depth of field")
+    lines.append("   - No halos, artifacts, or unnatural edges around product")
     
     return "\n".join(lines)
 
