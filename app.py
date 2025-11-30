@@ -401,13 +401,13 @@ def build_labeled_prompt(base_prompt, detail_labels, background_description=""):
 @app.route('/generate-studio-image-v2', methods=['POST'])
 def generate_studio_image_v2():
     """
-    Three-stage generation with background lighting matching.
+    Two-stage generation - Background-first approach.
     
-    Stage 1: Analyze background's lighting scheme
-    Stage 2: Generate product on background (top-down, matched lighting) - RETURN THIS
-    Stage 3: (Future) Refine while keeping background
+    The insight: Products reproduce well because they're the primary focus.
+    So let's make the background the primary focus first, then add the product.
     
-    For now, returns Stage 2 result so user can see it.
+    Stage 1: Reproduce the background EXACTLY (like a product photo of the surface)
+    Stage 2: Add the product onto that reproduced background
     """
     if 'image' not in request.files:
         return jsonify({"error": "No reference image provided"}), 400
@@ -418,7 +418,7 @@ def generate_studio_image_v2():
     lighting_prompt = request.form.get('lightingPrompt', '')
     background_description = request.form.get('backgroundDescription', '')
     
-    # Background image
+    # Background image - this time we USE it
     background_image = None
     background_mime = None
     
@@ -458,41 +458,85 @@ def generate_studio_image_v2():
                 prompt, quality, detail_images, detail_labels, background_description
             )
         
-        print(f"--- V2 Three-Stage Generation: {quality} ---")
+        print(f"--- V2 Background-First Generation: {quality} ---")
         
         # ==========================================
-        # STAGE 1: Analyze background's lighting
+        # STAGE 1: Reproduce background EXACTLY
         # ==========================================
-        print("--- Stage 1: Analyzing background lighting ---")
+        print("--- Stage 1: Reproducing background exactly ---")
         
-        lighting_analysis = analyze_image_lighting(background_image, background_mime)
-        print(f"--- Lighting analysis: {lighting_analysis[:200]}... ---")
+        stage1_parts = []
+        # Background image is THE ONLY image - treat it like a product
+        stage1_parts.append(types.Part.from_bytes(data=background_image, mime_type=background_mime))
+        
+        stage1_prompt = """Recreate this image EXACTLY as a studio photograph.
+
+IMAGE 1: Reference image to reproduce with PERFECT FIDELITY.
+
+TASK: Create an EXACT reproduction of this image.
+- Copy EVERY detail precisely: colors, textures, patterns, text, markings, logos, writing
+- This is not inspiration - reproduce it EXACTLY as shown
+- Match the exact colors, lighting, and contrast
+- If there is text or writing, reproduce it EXACTLY as it appears
+- If there are logos or branding, reproduce them EXACTLY
+
+OUTPUT: A perfect reproduction of the reference image, as if photographed in a studio with clean, even lighting.
+
+CRITICAL: Reproduce EVERYTHING in the image exactly. Every mark, every line, every detail."""
+        
+        stage1_parts.append(stage1_prompt)
+        
+        stage1_image = None
+        max_retries = 3
+        
+        for attempt in range(max_retries):
+            try:
+                response = client.models.generate_content(
+                    model=IMAGE_GEN_MODEL,
+                    contents=stage1_parts,
+                    config=types.GenerateContentConfig(
+                        response_modalities=["TEXT", "IMAGE"],
+                        image_config=types.ImageConfig(
+                            aspect_ratio="1:1",
+                            image_size=quality
+                        )
+                    )
+                )
+                
+                if response.candidates and response.candidates[0].content.parts:
+                    for part in response.candidates[0].content.parts:
+                        if part.inline_data:
+                            stage1_image = part.inline_data.data
+                            print(f"--- Stage 1 (background) complete. Size: {len(stage1_image)} bytes ---")
+                            break
+                
+                if stage1_image:
+                    break
+                    
+            except Exception as e:
+                print(f"--- Stage 1 attempt {attempt + 1} failed: {e} ---")
+                continue
+        
+        if not stage1_image:
+            return jsonify({"error": "Stage 1 failed - could not reproduce background"}), 500
         
         # ==========================================
-        # STAGE 2: Generate product on background with matched lighting
+        # STAGE 2: Add product onto the background
         # ==========================================
-        print("--- Stage 2: Generating product on background (top-down, matched lighting) ---")
+        print("--- Stage 2: Adding product to background ---")
         
         stage2_parts = []
-        # Image 1: Product
+        # Image 1: The reproduced background
+        stage2_parts.append(types.Part.from_bytes(data=stage1_image, mime_type="image/png"))
+        # Image 2: The product to add
         stage2_parts.append(types.Part.from_bytes(data=main_image_bytes, mime_type=main_file.content_type))
-        # Image 2: Background
-        stage2_parts.append(types.Part.from_bytes(data=background_image, mime_type=background_mime))
         
         # Add detail images
         for detail_bytes, detail_mime in detail_images:
             stage2_parts.append(types.Part.from_bytes(data=detail_bytes, mime_type=detail_mime))
         
-        stage2_prompt = build_product_on_background_prompt(
-            prompt, 
-            detail_labels, 
-            lighting_analysis,
-            background_description
-        )
+        stage2_prompt = build_stage2_add_product_prompt(prompt, detail_labels, lighting_prompt)
         stage2_parts.append(stage2_prompt)
-        
-        stage2_image = None
-        max_retries = 3
         
         for attempt in range(max_retries):
             try:
@@ -511,178 +555,27 @@ def generate_studio_image_v2():
                 if response.candidates and response.candidates[0].content.parts:
                     for part in response.candidates[0].content.parts:
                         if part.inline_data:
-                            stage2_image = part.inline_data.data
-                            print(f"--- Stage 2 complete. Size: {len(stage2_image)} bytes ---")
-                            break
+                            final_image_b64 = base64.b64encode(part.inline_data.data).decode('utf-8')
+                            print(f"--- Stage 2 (add product) complete. Final size: {len(part.inline_data.data)} bytes ---")
+                            return jsonify({
+                                "message": "Two-stage image generated successfully",
+                                "image": final_image_b64
+                            })
                 
-                if stage2_image:
-                    break
-                    
             except Exception as e:
                 print(f"--- Stage 2 attempt {attempt + 1} failed: {e} ---")
                 continue
         
-        if not stage2_image:
-            return jsonify({"error": "Failed to generate product on background"}), 500
-        
-        # ==========================================
-        # STAGE 3: Refine while keeping background
-        # ==========================================
-        print("--- Stage 3: Refining (keeping background intact) ---")
-        
-        stage3_parts = []
-        # The composed image from Stage 2
-        stage3_parts.append(types.Part.from_bytes(data=stage2_image, mime_type="image/png"))
-        
-        stage3_prompt = build_refinement_prompt(lighting_prompt)
-        stage3_parts.append(stage3_prompt)
-        
-        for attempt in range(max_retries):
-            try:
-                response = client.models.generate_content(
-                    model=IMAGE_GEN_MODEL,
-                    contents=stage3_parts,
-                    config=types.GenerateContentConfig(
-                        response_modalities=["TEXT", "IMAGE"],
-                        image_config=types.ImageConfig(
-                            aspect_ratio="1:1",
-                            image_size=quality
-                        )
-                    )
-                )
-                
-                if response.candidates and response.candidates[0].content.parts:
-                    for part in response.candidates[0].content.parts:
-                        if part.inline_data:
-                            final_image_b64 = base64.b64encode(part.inline_data.data).decode('utf-8')
-                            print(f"--- Stage 3 complete. Final size: {len(part.inline_data.data)} bytes ---")
-                            
-                            # Return both stage 2 and final for comparison
-                            return jsonify({
-                                "message": "Three-stage generation complete",
-                                "image": final_image_b64,
-                                "intermediate": base64.b64encode(stage2_image).decode('utf-8')
-                            })
-                
-            except Exception as e:
-                print(f"--- Stage 3 attempt {attempt + 1} failed: {e} ---")
-                continue
-        
-        # Stage 3 failed - return Stage 2 result
-        print("--- Stage 3 failed, returning Stage 2 result ---")
+        # Stage 2 failed - return Stage 1 (just the background)
+        print("--- Stage 2 failed, returning background only ---")
         return jsonify({
-            "message": "Partial success - refinement failed, returning composed image",
-            "image": base64.b64encode(stage2_image).decode('utf-8')
+            "message": "Partial success - could not add product",
+            "image": base64.b64encode(stage1_image).decode('utf-8')
         })
 
     except Exception as e:
         print(f"!!!!!!!!!!!!!! V2 IMAGE GEN ERROR: {e}")
         return jsonify({"error": str(e)}), 500
-
-
-def analyze_image_lighting(image_bytes, mime_type):
-    """Analyze the lighting characteristics of an image."""
-    prompt = """Analyze the lighting in this image. Describe:
-
-1. LIGHT DIRECTION: Where is the main light coming from? (top, top-left, side, etc.)
-2. LIGHT QUALITY: Is it soft/diffused or hard/direct?
-3. LIGHT COLOR/TEMPERATURE: Warm, cool, neutral? Any color cast?
-4. SHADOWS: How dark are the shadows? Soft or hard edges?
-5. HIGHLIGHTS: Where are the brightest areas? How intense?
-6. AMBIENT LIGHT: Is there fill light or is it high contrast?
-
-Provide a concise description (50-80 words) that could be used to recreate this exact lighting on another object placed in this scene."""
-
-    try:
-        response = client.models.generate_content(
-            model=ANALYSIS_MODEL,
-            contents=[types.Part.from_bytes(data=image_bytes, mime_type=mime_type), prompt]
-        )
-        return response.text.strip()
-    except Exception as e:
-        print(f"Lighting analysis failed: {e}")
-        return "Soft, even lighting from above with gentle shadows"
-
-
-def build_product_on_background_prompt(base_prompt, detail_labels, lighting_analysis, background_description=""):
-    """Build prompt for placing product on background with matched lighting."""
-    lines = []
-    
-    lines.append("You have TWO reference images to combine:")
-    lines.append("")
-    lines.append("Image 1: PRODUCT")
-    lines.append("- Recreate this EXACT object with perfect fidelity")
-    lines.append("- Match every detail: shape, colors, materials, textures, any text/logos")
-    lines.append("")
-    lines.append("Image 2: BACKGROUND SURFACE")
-    lines.append("- This is a surface/backdrop laying flat (top-down view)")
-    lines.append("- Reproduce this EXACTLY: same material, colors, textures, patterns")
-    lines.append("- Include ALL details: any text, writing, markings, logos, branding")
-    lines.append("- This is NOT inspiration - copy it EXACTLY as shown")
-    lines.append("")
-    
-    for i, label in enumerate(detail_labels):
-        lines.append(f"Image {i + 3}: Product detail reference - '{label}'")
-    if detail_labels:
-        lines.append("")
-    
-    lines.append("=" * 50)
-    lines.append("TASK: Place product on the background surface (TOP-DOWN VIEW)")
-    lines.append("=" * 50)
-    lines.append("")
-    lines.append("Create a photograph looking STRAIGHT DOWN at the surface, with the product sitting on it.")
-    lines.append("")
-    
-    if background_description:
-        lines.append(f"Background details: {background_description}")
-        lines.append("")
-    
-    lines.append("LIGHTING TO MATCH:")
-    lines.append(lighting_analysis)
-    lines.append("")
-    lines.append("The product must be lit EXACTLY like the background - same light direction, quality, and shadows.")
-    lines.append("")
-    
-    lines.append("CRITICAL REQUIREMENTS:")
-    lines.append("- TOP-DOWN / FLAT LAY perspective - camera looking straight down")
-    lines.append("- Background fills the ENTIRE frame - no edges visible")
-    lines.append("- Product sits naturally ON the surface")
-    lines.append("- Reproduce background EXACTLY including any text, markings, branding")
-    lines.append("- Reproduce product EXACTLY")
-    lines.append("- Natural contact shadow under product")
-    lines.append("- Lighting on product matches lighting on background PERFECTLY")
-    lines.append("")
-    lines.append("OUTPUT: A top-down photograph of the exact product on the exact background surface.")
-    
-    return "\n".join(lines)
-
-
-def build_refinement_prompt(lighting_prompt):
-    """Build prompt for refining the composed image while keeping background."""
-    lines = []
-    
-    lines.append("Enhance this product photograph while KEEPING THE BACKGROUND EXACTLY AS IS.")
-    lines.append("")
-    lines.append("DO NOT CHANGE:")
-    lines.append("- The background/surface - keep every detail, text, marking exactly")
-    lines.append("- The product identity - same object, same details")
-    lines.append("- The composition and framing")
-    lines.append("")
-    lines.append("YOU MAY REFINE:")
-    lines.append("- Product clarity and sharpness")
-    lines.append("- Light/shadow quality on the product")
-    lines.append("- Natural integration between product and surface")
-    lines.append("- Overall photographic quality")
-    lines.append("")
-    
-    if lighting_prompt:
-        lines.append("LIGHTING STYLE:")
-        lines.append(lighting_prompt)
-        lines.append("")
-    
-    lines.append("OUTPUT: The same scene with enhanced photographic quality. Background unchanged.")
-    
-    return "\n".join(lines)
 
 
 def generate_studio_image_v1_internal(main_bytes, main_mime, prompt, quality, detail_images, detail_labels, bg_desc):
@@ -718,6 +611,47 @@ def generate_studio_image_v1_internal(main_bytes, main_mime, prompt, quality, de
             continue
     
     return jsonify({"error": "Generation failed"}), 500
+
+
+def build_stage2_add_product_prompt(base_prompt, detail_labels, lighting_prompt):
+    """Stage 2: Add product onto the reproduced background."""
+    lines = []
+    
+    lines.append("You have TWO reference images:")
+    lines.append("")
+    lines.append("Image 1: BACKGROUND - A studio backdrop. Keep this EXACTLY as is.")
+    lines.append("Image 2: PRODUCT - An object to place on the background. Reproduce this EXACTLY.")
+    
+    for i, label in enumerate(detail_labels):
+        lines.append(f"Image {i + 3}: Detail reference for product - '{label}'")
+    
+    lines.append("")
+    lines.append("=" * 50)
+    lines.append("TASK: Place the product onto the background")
+    lines.append("=" * 50)
+    lines.append("")
+    lines.append("Create a photograph where:")
+    lines.append("- The background (Image 1) remains EXACTLY as shown - every detail, text, marking preserved")
+    lines.append("- The product (Image 2) is reproduced EXACTLY and placed on/against the background")
+    lines.append("- The product sits naturally with appropriate shadow and lighting")
+    lines.append("")
+    lines.append(base_prompt)
+    lines.append("")
+    
+    if lighting_prompt:
+        lines.append("LIGHTING:")
+        lines.append(lighting_prompt)
+        lines.append("")
+    
+    lines.append("CRITICAL REQUIREMENTS:")
+    lines.append("- DO NOT modify, blur, or simplify the background - keep it pixel-perfect")
+    lines.append("- DO NOT modify the product - reproduce it exactly from Image 2")
+    lines.append("- Add natural contact shadow where product meets surface")
+    lines.append("- Unified lighting across both elements")
+    lines.append("")
+    lines.append("OUTPUT: A photograph of the exact product on the exact background.")
+    
+    return "\n".join(lines)
 
 
 # ==========================================
