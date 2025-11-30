@@ -258,54 +258,50 @@ def generate_studio_image():
 
 def build_labeled_prompt(base_prompt, detail_labels, has_background=False):
     """
-    Build an explicitly labeled prompt following Gemini 3 Pro best practices.
+    Build an explicitly labeled prompt for studio product photography.
     
-    Format:
-    - Image 1: Main reference (master product image)
-    - Image 2: Background reference (if provided)
-    - Image 3+: [detail label] (detail reference)
-    ...
-    
-    [Base prompt with preservation language]
+    Image order:
+    - Image 1: Main product reference
+    - Image 2: Background/surface material sample (if provided)
+    - Image 3+: Detail references
     """
     lines = []
     
-    # Always label Image 1 as the master reference
-    lines.append("- Image 1: Main reference image (master product shot - use this as the authoritative source for the object's shape, proportions, and overall appearance)")
+    # Label images
+    lines.append("IMAGE REFERENCES:")
+    lines.append("- Image 1: Product reference (recreate this exact object)")
     
-    # Track image index
     next_idx = 2
     
-    # Label background image if present
     if has_background:
-        lines.append(f"- Image {next_idx}: Background/surface reference (use this as visual reference for the background material, texture, color, and pattern)")
+        lines.append(f"- Image {next_idx}: Surface material sample (use this material for the background surface)")
         next_idx += 1
     
-    # Label detail images
     for i, label in enumerate(detail_labels):
-        lines.append(f"- Image {next_idx}: {label} (detail reference - use for rendering this specific area accurately)")
+        lines.append(f"- Image {next_idx}: {label} (detail reference)")
         next_idx += 1
     
-    # Add the base prompt with preservation emphasis
     lines.append("")
-    lines.append("INSTRUCTIONS:")
+    lines.append("TASK:")
     lines.append(base_prompt)
     
-    # Add integration instructions
-    lines.append("")
     if has_background:
-        lines.append("CRITICAL - CREATING A COHESIVE STUDIO PHOTOGRAPH:")
-        lines.append("1. Generate a SEAMLESS studio backdrop using the material/surface shown in Image 2 as reference")
-        lines.append("2. The backdrop should be a proper studio surface (like a sweep or infinity cove) made of this material - NOT a wall behind the product")
-        lines.append("3. Light BOTH the product AND backdrop with the same studio lighting setup")
-        lines.append("4. Create natural CONTACT SHADOWS where the product meets the surface")
-        lines.append("5. Add subtle REFLECTED LIGHT from the backdrop onto the product (color spill)")
-        lines.append("6. Match depth of field - both product and nearby backdrop should be in focus")
-        lines.append("7. The final image must look like a SINGLE photograph taken in a studio, not a composite")
         lines.append("")
-    lines.append("Preserve the exact object from Image 1.")
+        lines.append("BACKGROUND SURFACE:")
+        lines.append("Create a TOP-DOWN / FLAT LAY product photograph.")
+        lines.append("- The camera is positioned directly above, looking straight down")
+        lines.append("- The product sits on a FLAT HORIZONTAL SURFACE (like a table or floor)")
+        lines.append("- Use Image 2 as a MATERIAL SAMPLE - match its texture, color, and pattern for the surface")
+        lines.append("- Generate a fresh surface using this material type - do not copy Image 2 exactly")
+        lines.append("- The surface should extend to fill the entire background")
+        lines.append("- Create a natural contact shadow directly beneath/around the product")
+        lines.append("- Apply the lighting style specified above consistently to both product and surface")
+    
+    lines.append("")
+    lines.append("Recreate the exact object from Image 1 with high detail and accuracy.")
+    
     if detail_labels:
-        lines.append("Use the detail reference images to ensure accurate rendering of textures and fine details.")
+        lines.append("Use detail reference images for accurate textures and fine details.")
     
     return "\n".join(lines)
 
