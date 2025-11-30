@@ -400,11 +400,18 @@ def build_labeled_prompt(base_prompt, detail_labels, background_description=""):
     lines.append("   - Subtle color spill from background onto product edges")
     lines.append("")
     
-    lines.append("3. PHOTOGRAPHIC QUALITY")
-    lines.append("   - Result must look like a single photograph, not a composite")
-    lines.append("   - Professional studio photography aesthetic")
-    lines.append("   - Sharp focus on product, natural depth of field")
-    lines.append("   - No halos, artifacts, or unnatural edges around product")
+    lines.append("3. REAL PHOTOGRAPH - NOT 3D RENDER")
+    lines.append("   - This MUST look like an actual photograph taken with a real camera")
+    lines.append("   - DO NOT create a 3D render, CGI, or computer-generated image")
+    lines.append("   - Include natural photographic characteristics:")
+    lines.append("     * Subtle film/sensor grain")
+    lines.append("     * Natural depth of field (slight softness away from focus plane)")
+    lines.append("     * Real material textures (fabric weave, surface imperfections, natural wear)")
+    lines.append("     * Authentic lighting falloff (not perfectly uniform)")
+    lines.append("     * Micro-details that exist in real objects (dust, fibers, slight irregularities)")
+    lines.append("   - Materials should look REAL, not plastic or CG-perfect")
+    lines.append("   - Avoid the 'too clean' or 'too perfect' look of 3D renders")
+    lines.append("   - No halos, artifacts, or unnatural edges")
     
     return "\n".join(lines)
 
