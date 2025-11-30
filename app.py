@@ -133,7 +133,7 @@ Output ONLY the label. No quotes, no introductory phrases."""
 
 @app.route('/analyze-background', methods=['POST'])
 def analyze_background():
-    """Analyze a background image and return both a short name and highly detailed description."""
+    """Analyze a background image and return name, description, and whether it has branding/text."""
     if 'image' not in request.files:
         return jsonify({"error": "No image file provided"}), 400
     
@@ -144,7 +144,7 @@ def analyze_background():
     
     Your goal: Describe EVERYTHING in this image so it can be reproduced EXACTLY.
     
-    Provide TWO things:
+    Provide THREE things:
     
     1. NAME: A descriptive 2-4 word name (e.g., "Lined Paper Notes", "Red Brick Wall", "Branded Wood Surface")
     
@@ -167,10 +167,17 @@ def analyze_background():
     - Any shadows or highlights?
     - Overall mood/feel
     
+    3. HAS_BRANDING: Set to TRUE if this image contains ANY of the following that must be preserved exactly:
+       - Text, words, letters, numbers, or writing of any kind
+       - Logos, brand marks, or symbols
+       - Specific designs, patterns with meaning, or graphics
+       - Handwriting, signatures, or stamps
+       Set to FALSE if this is just a plain material/texture (wood, concrete, fabric, paper without writing, plain surfaces)
+    
     CRITICAL: Capture EVERY detail. If there is handwriting, describe what it says. If there are logos, describe them. Nothing should be omitted.
     
     Output as JSON:
-    {"name": "Short Name", "description": "Complete detailed description of everything visible..."}
+    {"name": "Short Name", "description": "Complete detailed description...", "has_branding": true/false}
     """
     
     try:
@@ -184,9 +191,10 @@ def analyze_background():
         
         result = json.loads(clean_json_text(response.text))
         
-        # Ensure we have both fields
+        # Ensure we have all fields
         name = result.get("name", "Custom Background")
         description = result.get("description", name)
+        has_branding = result.get("has_branding", False)
         
         # Clean up name if too long
         words = name.split()
@@ -195,8 +203,9 @@ def analyze_background():
         
         print(f"--- Background analyzed: {name} ---")
         print(f"--- Description length: {len(description)} chars ---")
+        print(f"--- Has branding/text: {has_branding} ---")
         
-        return jsonify({"name": name, "description": description})
+        return jsonify({"name": name, "description": description, "has_branding": has_branding})
     except Exception as e:
         print(f"!!!!!!!!!!!!!! BACKGROUND ANALYSIS ERROR: {e}")
         return jsonify({"error": str(e)}), 500
