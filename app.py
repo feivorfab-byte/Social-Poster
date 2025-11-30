@@ -374,11 +374,7 @@ def generate_image(content_parts, quality):
                 model=IMAGE_GEN_MODEL,
                 contents=content_parts,
                 config=types.GenerateContentConfig(
-                    response_modalities=["TEXT", "IMAGE"],
-                    image_config=types.ImageConfig(
-                        aspect_ratio="1:1",
-                        image_size=quality
-                    )
+                    response_modalities=["TEXT", "IMAGE"]
                 )
             )
             
@@ -497,8 +493,10 @@ def build_generation_prompt(gen_req, has_master=False, has_cached_bg=False):
     if gen_req.visible_text:
         sections.append(f"PRESERVE TEXT: {gen_req.visible_text}")
     
-    # Output quality
-    sections.append(get_prompt('output_quality'))
+    # Output quality (include aspect ratio since we can't set via API)
+    quality_instruction = get_prompt('output_quality')
+    quality_instruction += " Square 1:1 aspect ratio."
+    sections.append(quality_instruction)
     
     return "\n\n".join(sections)
 
