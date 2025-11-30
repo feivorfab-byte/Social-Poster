@@ -417,7 +417,287 @@ def build_labeled_prompt(base_prompt, detail_labels, background_description=""):
 
 
 # ==========================================
-# 2. FINISHED PROJECT ENDPOINTS
+# 2. TWO-STAGE GENERATION (EXPERIMENTAL)
+# ==========================================
+
+@app.route('/generate-studio-image-v2', methods=['POST'])
+def generate_studio_image_v2():
+    """
+    Two-stage studio image generation for better background integration.
+    
+    Stage 1: Place product on background with soft, neutral lighting
+             Focus on perfect integration and material matching
+    
+    Stage 2: Re-light the composed image with user's selected lighting scheme
+             Focus only on lighting transformation
+    """
+    if 'image' not in request.files:
+        return jsonify({"error": "No reference image provided"}), 400
+        
+    main_file = request.files['image']
+    prompt = request.form.get('prompt', 'Turn this into a studio photograph.')
+    quality = request.form.get('quality', '1K')
+    lighting_prompt = request.form.get('lightingPrompt', '')  # User's lighting selection
+    
+    # Background image is now sent again for v2
+    background_image = None
+    background_mime = None
+    background_description = request.form.get('backgroundDescription', '')
+    
+    if 'backgroundImage' in request.files:
+        bg_file = request.files['backgroundImage']
+        background_image = bg_file.read()
+        background_mime = bg_file.content_type
+        print(f"--- V2: Background reference image received: {len(background_image)} bytes ---")
+    
+    # Get detail images (up to 3)
+    detail_images = []
+    detail_labels = []
+    
+    for i in range(1, 4):
+        detail_key = f'detail{i}'
+        label_key = f'detail{i}Label'
+        label_key_alt = f'detail{i}_label'
+        
+        if detail_key in request.files:
+            detail_file = request.files[detail_key]
+            detail_bytes = detail_file.read()
+            detail_images.append((detail_bytes, detail_file.content_type))
+            label = request.form.get(label_key) or request.form.get(label_key_alt) or f'Detail {i}'
+            detail_labels.append(label)
+    
+    if quality not in ['1K', '2K']:
+        quality = '1K'
+    
+    try:
+        main_image_bytes = main_file.read()
+        print(f"--- V2 Two-Stage Generation: {quality} ---")
+        print(f"--- Stage 1: Soft lighting integration ---")
+        
+        # ==========================================
+        # STAGE 1: Integration with soft neutral lighting
+        # ==========================================
+        stage1_parts = []
+        
+        # Image 1: Product reference
+        stage1_parts.append(types.Part.from_bytes(data=main_image_bytes, mime_type=main_file.content_type))
+        
+        # Image 2: Background reference (if provided)
+        if background_image:
+            stage1_parts.append(types.Part.from_bytes(data=background_image, mime_type=background_mime))
+        
+        # Add detail images
+        for detail_bytes, detail_mime in detail_images:
+            stage1_parts.append(types.Part.from_bytes(data=detail_bytes, mime_type=detail_mime))
+        
+        # Build Stage 1 prompt - focus on integration, soft lighting
+        stage1_prompt = build_stage1_prompt(
+            prompt, 
+            detail_labels, 
+            has_background_image=background_image is not None,
+            background_description=background_description
+        )
+        stage1_parts.append(stage1_prompt)
+        
+        # Generate Stage 1
+        stage1_image = None
+        max_retries = 3
+        
+        for attempt in range(max_retries):
+            try:
+                response = client.models.generate_content(
+                    model=IMAGE_GEN_MODEL,
+                    contents=stage1_parts,
+                    config=types.GenerateContentConfig(
+                        response_modalities=["TEXT", "IMAGE"],
+                        image_config=types.ImageConfig(
+                            aspect_ratio="1:1",
+                            image_size=quality
+                        )
+                    )
+                )
+                
+                if response.candidates and response.candidates[0].content.parts:
+                    for part in response.candidates[0].content.parts:
+                        if part.inline_data:
+                            stage1_image = part.inline_data.data
+                            print(f"--- Stage 1 complete on attempt {attempt + 1}. Size: {len(stage1_image)} bytes ---")
+                            break
+                
+                if stage1_image:
+                    break
+                    
+            except Exception as e:
+                print(f"--- Stage 1 attempt {attempt + 1} failed: {e} ---")
+                continue
+        
+        if not stage1_image:
+            return jsonify({"error": "Stage 1 failed - could not generate base image"}), 500
+        
+        # ==========================================
+        # STAGE 2: Apply user's lighting scheme
+        # ==========================================
+        print(f"--- Stage 2: Applying lighting: {lighting_prompt[:50] if lighting_prompt else 'default'}... ---")
+        
+        stage2_parts = []
+        
+        # Image 1: Stage 1 output (the composed image)
+        stage2_parts.append(types.Part.from_bytes(data=stage1_image, mime_type="image/png"))
+        
+        # Build Stage 2 prompt - focus only on lighting transformation
+        stage2_prompt = build_stage2_prompt(lighting_prompt)
+        stage2_parts.append(stage2_prompt)
+        
+        # Generate Stage 2
+        for attempt in range(max_retries):
+            try:
+                response = client.models.generate_content(
+                    model=IMAGE_GEN_MODEL,
+                    contents=stage2_parts,
+                    config=types.GenerateContentConfig(
+                        response_modalities=["TEXT", "IMAGE"],
+                        image_config=types.ImageConfig(
+                            aspect_ratio="1:1",
+                            image_size=quality
+                        )
+                    )
+                )
+                
+                if response.candidates and response.candidates[0].content.parts:
+                    for part in response.candidates[0].content.parts:
+                        if part.inline_data:
+                            final_image_b64 = base64.b64encode(part.inline_data.data).decode('utf-8')
+                            print(f"--- Stage 2 complete on attempt {attempt + 1}. Final size: {len(part.inline_data.data)} bytes ---")
+                            return jsonify({
+                                "message": "Two-stage image generated successfully",
+                                "image": final_image_b64
+                            })
+                
+                print(f"--- Stage 2 attempt {attempt + 1}: No image in response ---")
+                
+            except Exception as e:
+                print(f"--- Stage 2 attempt {attempt + 1} failed: {e} ---")
+                continue
+        
+        # Stage 2 failed - return Stage 1 result as fallback
+        print("--- Stage 2 failed, returning Stage 1 result ---")
+        return jsonify({
+            "message": "Partial success - lighting adjustment failed",
+            "image": base64.b64encode(stage1_image).decode('utf-8')
+        })
+
+    except Exception as e:
+        print(f"!!!!!!!!!!!!!! V2 IMAGE GEN ERROR: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+def build_stage1_prompt(base_prompt, detail_labels, has_background_image=False, background_description=""):
+    """
+    Stage 1 prompt: Focus on perfect object placement and background integration.
+    Uses soft, even lighting to make integration easier.
+    """
+    lines = []
+    
+    lines.append("IMAGE REFERENCES:")
+    lines.append("Image 1: Product reference - recreate this EXACT object with perfect fidelity.")
+    
+    next_idx = 2
+    if has_background_image:
+        lines.append(f"Image {next_idx}: Background/surface reference - match this EXACT material, texture, color, and pattern.")
+        next_idx += 1
+    
+    for label in detail_labels:
+        lines.append(f"Image {next_idx}: Detail reference - '{label}'")
+        next_idx += 1
+    
+    lines.append("")
+    lines.append("=" * 50)
+    lines.append("STAGE 1: PERFECT INTEGRATION")
+    lines.append("=" * 50)
+    lines.append("")
+    lines.append("Create a product photograph with PERFECT background integration.")
+    lines.append("")
+    
+    # Extract object/camera info from base_prompt
+    lines.append(base_prompt)
+    lines.append("")
+    
+    if has_background_image:
+        lines.append("BACKGROUND INTEGRATION - CRITICAL:")
+        lines.append("- Reproduce the EXACT surface from Image 2")
+        lines.append("- Match the precise color tones, texture, grain/pattern direction")
+        lines.append("- Match the material's reflectivity and surface finish")
+        if background_description:
+            lines.append(f"- Material details: {background_description}")
+        lines.append("- The surface must look like a continuous, real material")
+        lines.append("- Product sits naturally ON the surface (not floating, not pasted)")
+        lines.append("")
+    
+    lines.append("LIGHTING FOR THIS STAGE:")
+    lines.append("- Soft, diffused, even lighting from above")
+    lines.append("- Minimal harsh shadows")
+    lines.append("- Goal: Clean integration first, dramatic lighting comes in Stage 2")
+    lines.append("")
+    
+    lines.append("INTEGRATION REQUIREMENTS:")
+    lines.append("- Natural contact shadow where product meets surface")
+    lines.append("- Subtle ambient occlusion at contact points")
+    lines.append("- Color interaction between product and surface (subtle reflections)")
+    lines.append("- Product and surface must appear to be in the same physical space")
+    lines.append("- This must look like ONE photograph, not a composite")
+    lines.append("")
+    
+    lines.append("PHOTOREALISM:")
+    lines.append("- Real photograph, NOT a 3D render")
+    lines.append("- Natural material textures and imperfections")
+    lines.append("- Subtle film grain, natural depth of field")
+    
+    return "\n".join(lines)
+
+
+def build_stage2_prompt(lighting_prompt):
+    """
+    Stage 2 prompt: Apply the user's lighting scheme to the composed image.
+    Preserve everything else - just change the lighting.
+    """
+    lines = []
+    
+    lines.append("IMAGE REFERENCE:")
+    lines.append("Image 1: Source photograph - preserve this EXACTLY, only modify the lighting.")
+    lines.append("")
+    lines.append("=" * 50)
+    lines.append("STAGE 2: LIGHTING TRANSFORMATION")
+    lines.append("=" * 50)
+    lines.append("")
+    lines.append("Re-light this photograph with the following lighting setup:")
+    lines.append("")
+    
+    if lighting_prompt:
+        lines.append(lighting_prompt)
+    else:
+        lines.append("Professional studio lighting - three-point softbox setup")
+    
+    lines.append("")
+    lines.append("CRITICAL - PRESERVE EVERYTHING ELSE:")
+    lines.append("- Keep the EXACT same object in the EXACT same position")
+    lines.append("- Keep the EXACT same background/surface")
+    lines.append("- Keep the EXACT same camera angle and framing")
+    lines.append("- Keep the EXACT same composition")
+    lines.append("- ONLY change how light falls on the scene")
+    lines.append("")
+    lines.append("LIGHTING TRANSFORMATION ONLY:")
+    lines.append("- Adjust shadows and highlights according to new lighting")
+    lines.append("- Update reflections/specular highlights for new light direction")
+    lines.append("- Maintain realistic light behavior on all materials")
+    lines.append("- Background surface should respond to new lighting naturally")
+    lines.append("")
+    lines.append("OUTPUT: The same photograph, re-lit. Nothing else changes.")
+    
+    return "\n".join(lines)
+
+
+# ==========================================
+# 3. FINISHED PROJECT ENDPOINTS
 # ==========================================
 
 @app.route('/generate-interview-questions', methods=['POST'])
