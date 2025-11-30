@@ -274,7 +274,7 @@ def build_labeled_prompt(base_prompt, detail_labels, has_background=False):
     next_idx = 2
     
     if has_background:
-        lines.append(f"- Image {next_idx}: Surface material sample (use this material for the background surface)")
+        lines.append(f"- Image {next_idx}: Surface MATERIAL SAMPLE (extract texture, color, pattern only)")
         next_idx += 1
     
     for i, label in enumerate(detail_labels):
@@ -287,15 +287,22 @@ def build_labeled_prompt(base_prompt, detail_labels, has_background=False):
     
     if has_background:
         lines.append("")
-        lines.append("BACKGROUND SURFACE:")
-        lines.append("Create a TOP-DOWN / FLAT LAY product photograph.")
-        lines.append("- The camera is positioned directly above, looking straight down")
-        lines.append("- The product sits on a FLAT HORIZONTAL SURFACE (like a table or floor)")
-        lines.append("- Use Image 2 as a MATERIAL SAMPLE - match its texture, color, and pattern for the surface")
-        lines.append("- Generate a fresh surface using this material type - do not copy Image 2 exactly")
-        lines.append("- The surface should extend to fill the entire background")
-        lines.append("- Create a natural contact shadow directly beneath/around the product")
-        lines.append("- Apply the lighting style specified above consistently to both product and surface")
+        lines.append("SCENE SETUP:")
+        lines.append("- TOP-DOWN camera angle, looking straight down at the product")
+        lines.append("- Product rests on a flat horizontal surface")
+        lines.append("- Surface material: Match the texture, color, and pattern from Image 2")
+        lines.append("- Generate fresh surface - do NOT composite or copy Image 2 directly")
+        lines.append("")
+        lines.append("CRITICAL - UNIFIED LIGHTING:")
+        lines.append("The product and surface must appear lit by the SAME light source(s).")
+        lines.append("- Light direction: Identical on both product and surface")
+        lines.append("- Highlights: Surface shows highlights/hotspots matching the product's lit areas") 
+        lines.append("- Shadows on surface: Must match the light direction hitting the product")
+        lines.append("- Contact shadow: Soft shadow where product meets surface, darkest at contact point, fading outward")
+        lines.append("- Color bleed: Subtle reflected color from surface onto product's underside/edges")
+        lines.append("- The surface texture should be revealed by the lighting (not flat/even)")
+        lines.append("")
+        lines.append("This must look like ONE photograph, not a product pasted onto a background.")
     
     lines.append("")
     lines.append("Recreate the exact object from Image 1 with high detail and accuracy.")
