@@ -624,13 +624,24 @@ def build_stage1_prompt(base_prompt, detail_labels, has_background_image=False, 
     
     if has_background_image:
         lines.append("BACKGROUND INTEGRATION - CRITICAL:")
-        lines.append("- Reproduce the EXACT surface from Image 2")
-        lines.append("- Match the precise color tones, texture, grain/pattern direction")
+        lines.append("")
+        lines.append("STUDIO SETUP: This is a FLAT BACKDROP only - like a photography studio sweep/seamless paper.")
+        lines.append("- ONE single flat surface that serves as the backdrop")
+        lines.append("- DO NOT create a room, corner, or environment with multiple surfaces")
+        lines.append("- DO NOT create both a floor AND a wall - just ONE continuous backdrop surface")
+        lines.append("- Think: product sitting on an infinity cove / seamless backdrop")
+        lines.append("")
+        lines.append("MATERIAL MATCHING from Image 2:")
+        lines.append("- Reproduce the EXACT material, texture, color, and pattern from the reference")
+        lines.append("- Match the precise color tones and grain/pattern direction")
         lines.append("- Match the material's reflectivity and surface finish")
         if background_description:
             lines.append(f"- Material details: {background_description}")
-        lines.append("- The surface must look like a continuous, real material")
-        lines.append("- Product sits naturally ON the surface (not floating, not pasted)")
+        lines.append("")
+        lines.append("PLACEMENT:")
+        lines.append("- Product sits naturally on/against the backdrop surface")
+        lines.append("- Natural contact shadow where product meets surface")
+        lines.append("- The backdrop material continues behind/around the product seamlessly")
         lines.append("")
     
     lines.append("LIGHTING FOR THIS STAGE:")
