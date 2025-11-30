@@ -41,14 +41,14 @@ def home():
 
 @app.route('/analyze-image', methods=['POST'])
 def analyze_image():
-    """Analyze main reference image to get detailed description and camera angle."""
+    """Analyze main reference image to get detailed description, camera angle, and any visible text."""
     if 'image' not in request.files:
         return jsonify({"error": "No image file provided"}), 400
     
     file = request.files['image']
     
     prompt = """
-    Analyze this product photograph and provide TWO things:
+    Analyze this product photograph and provide THREE things:
     
     1. DESCRIPTION: A concise, highly specific physical description of the object shown. 
        Focus on geometry, shape, materials, surface textures, and colors. 
@@ -58,8 +58,13 @@ def analyze_image():
        Examples: "top-down flat lay", "3/4 view from above-left", "straight-on front view", 
        "low angle looking up", "eye-level 3/4 view", "overhead slightly angled"
     
+    3. VISIBLE_TEXT: List ALL visible text, labels, logos, brand names, numbers, or words 
+       that appear anywhere on the object. Be EXACT - include the precise text, spelling, 
+       capitalization, and location on the object. If no text is visible, use empty string.
+       Examples: "Logo 'HELLO KITTY' on chest, 'Made in Japan' on tag", "Number '42' on side"
+    
     Output as JSON:
-    {"description": "Object description...", "camera_angle": "angle description"}
+    {"description": "Object description...", "camera_angle": "angle description", "visible_text": "exact text found or empty string"}
     """
     
     try:
@@ -73,6 +78,11 @@ def analyze_image():
         result = json.loads(clean_json_text(response.text))
         description = result.get("description", "")
         camera_angle = result.get("camera_angle", "3/4 view")
+        visible_text = result.get("visible_text", "")
+        
+        # Append visible text to description if present
+        if visible_text:
+            description = f"{description} VISIBLE TEXT/LABELS: {visible_text}"
         
         return jsonify({
             "description": description,
@@ -85,18 +95,27 @@ def analyze_image():
 
 @app.route('/analyze-detail', methods=['POST'])
 def analyze_detail():
-    """Analyze a detail image using Gemini 2.5 Flash and return a concise label."""
+    """Analyze a detail image using Gemini 2.5 Flash and return a concise label with any visible text."""
     if 'image' not in request.files:
         return jsonify({"error": "No image file provided"}), 400
     
     file = request.files['image']
-    prompt = request.form.get('prompt', 'Identify the key visual element, texture, or detail shown in this image and describe it in 10 words or less.')
     
     try:
         image_bytes = file.read()
         
-        # Force clean output with explicit instruction
-        full_prompt = f"{prompt}\n\nIMPORTANT: Output ONLY the descriptive label text. No quotes, no introductory phrases, no punctuation at the end. Just the raw label."
+        # Updated prompt to capture both the detail and any visible text
+        full_prompt = """Analyze this close-up/detail image and provide:
+
+1. A brief label (5-10 words) describing the key visual element, texture, or detail shown.
+
+2. If there is ANY visible text, letters, numbers, logos, or words in this image, include them EXACTLY as they appear.
+
+Output format - just the label, and if text exists, add it after a colon:
+- If no text: "Pink fuzzy texture with hearts"
+- If text present: "Chest area with embroidered logo: 'HELLO KITTY'"
+
+Output ONLY the label. No quotes, no introductory phrases."""
         
         response = client.models.generate_content(
             model=ANALYSIS_MODEL,
@@ -164,6 +183,11 @@ def analyze_background():
     - Specific wear patterns (rounded edges, faded areas, stains, chips, cracks)
     - Patina or finish changes over time
     - Any grout, mortar, filler (color, width, condition)
+    
+    === VISIBLE TEXT/MARKINGS (if any) ===
+    - If there is ANY visible text, words, letters, numbers, logos, stamps, or printed markings on the surface, record them EXACTLY as they appear
+    - Include location and style of text (e.g., "faint stamped 'MADE IN USA' in corner", "newspaper headlines visible")
+    - If no text is present, omit this section
     
     Be EXTREMELY specific. Instead of "brown wood", say "medium-toned American walnut with prominent dark chocolate grain lines, honey-gold highlights between grain, and a hand-rubbed oil finish giving soft satin sheen."
     
