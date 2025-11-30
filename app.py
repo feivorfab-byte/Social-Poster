@@ -233,7 +233,7 @@ def build_labeled_prompt(base_prompt, detail_labels, has_background=False):
     
     # Label background image if present
     if has_background:
-        lines.append(f"- Image {next_idx}: Background reference image (use this exact background style, texture, color, and lighting for the studio backdrop)")
+        lines.append(f"- Image {next_idx}: Background style reference (use this image's texture, material, color, and pattern for the studio backdrop - but apply the lighting described in the prompt to create realistic light interaction, shadows, and reflections on this background surface)")
         next_idx += 1
     
     # Label detail images
@@ -249,7 +249,12 @@ def build_labeled_prompt(base_prompt, detail_labels, has_background=False):
     # Add preservation language per best practices
     lines.append("")
     if has_background:
-        lines.append("CRITICAL: Preserve the exact object from Image 1. Recreate the background to match Image 2's style, texture, and color as closely as possible.")
+        lines.append("CRITICAL BACKGROUND INSTRUCTIONS:")
+        lines.append("1. Recreate the background using the SAME material, texture, color, and pattern from Image 2")
+        lines.append("2. Apply the studio lighting from the prompt to the background - show realistic light falloff, shadows, and any reflections or highlights that would naturally occur on this surface type")
+        lines.append("3. The background should look like it's physically in the same studio environment as the product, lit by the same light sources")
+        lines.append("")
+    lines.append("Preserve the exact object from Image 1.")
     if detail_labels:
         lines.append("Use the detail reference images to ensure accurate rendering of specific areas, textures, and fine details that may not be fully visible in the main reference.")
     
