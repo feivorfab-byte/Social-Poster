@@ -41,7 +41,7 @@ def home():
 
 @app.route('/analyze-image', methods=['POST'])
 def analyze_image():
-    """Analyze main reference image to get detailed description, camera angle, and any visible text."""
+    """Analyze main reference image to get detailed description, camera angle, visible text, and real-world dimensions."""
     if 'image' not in request.files:
         return jsonify({"error": "No image file provided"}), 400
     
@@ -84,9 +84,48 @@ def analyze_image():
         if visible_text:
             description = f"{description} VISIBLE TEXT/LABELS: {visible_text}"
         
+        # Quick dimension lookup based on product description
+        product_dimensions = ""
+        try:
+            dimension_prompt = f"""Based on this product description, provide the typical real-world dimensions.
+
+Product: {description}
+
+Search your knowledge for this type of product and estimate realistic dimensions.
+If you can identify the specific product or brand from any visible text, use those exact dimensions.
+
+Output as JSON:
+{{"dimensions": "width x height x depth in inches (e.g., '24 x 28 x 2 inches' for a jacket, '3 x 5 x 1 inches' for a wallet)", "product_type": "what type of product this is"}}
+
+Be specific and realistic. Common references:
+- Adult jacket/shirt: roughly 24-28 inches wide
+- Watch face: roughly 1.5-2 inches diameter  
+- Shoe: roughly 10-13 inches long
+- Phone: roughly 3 x 6 inches
+- Bottle: varies widely by type
+
+Output ONLY the JSON."""
+
+            dim_response = client.models.generate_content(
+                model=ANALYSIS_MODEL,
+                contents=[dimension_prompt],
+                config=types.GenerateContentConfig(response_mime_type="application/json")
+            )
+            
+            dim_result = json.loads(clean_json_text(dim_response.text))
+            product_dimensions = dim_result.get("dimensions", "")
+            product_type = dim_result.get("product_type", "")
+            
+            if product_dimensions:
+                print(f"--- Product dimensions found: {product_dimensions} ({product_type}) ---")
+        except Exception as dim_error:
+            print(f"--- Dimension lookup failed (non-critical): {dim_error} ---")
+            product_dimensions = ""
+        
         return jsonify({
             "description": description,
-            "camera_angle": camera_angle
+            "camera_angle": camera_angle,
+            "product_dimensions": product_dimensions
         })
     except Exception as e:
         print(f"!!!!!!!!!!!!!! ANALYSIS ERROR: {e}")
@@ -246,6 +285,7 @@ def generate_studio_image():
     
     # Background is now description-only (no image sent)
     background_description = request.form.get('backgroundDescription', '')
+    product_dimensions = request.form.get('productDimensions', '')
     
     # Get detail images (up to 3)
     detail_images = []
@@ -272,6 +312,8 @@ def generate_studio_image():
         has_bg_desc = bool(background_description)
         print(f"--- Generating {quality} image with {len(detail_images)} detail ref(s) ---")
         print(f"--- Background description: {background_description[:100] if background_description else 'None'}... ---")
+        if product_dimensions:
+            print(f"--- Product dimensions: {product_dimensions} ---")
         print(f"--- Prompt snippet: {prompt[:150]}... ---")
 
         # Build content parts with indexed labeling per Gemini 3 Pro best practices
@@ -284,7 +326,7 @@ def generate_studio_image():
             content_parts.append(types.Part.from_bytes(data=detail_bytes, mime_type=detail_mime))
         
         # Build the indexed labeled prompt
-        labeled_prompt = build_labeled_prompt(prompt, detail_labels, background_description)
+        labeled_prompt = build_labeled_prompt(prompt, detail_labels, background_description, product_dimensions)
         content_parts.append(labeled_prompt)
 
         # Retry logic - try up to 3 times
@@ -334,7 +376,7 @@ def generate_studio_image():
         return jsonify({"error": str(e)}), 500
 
 
-def build_labeled_prompt(base_prompt, detail_labels, background_description=""):
+def build_labeled_prompt(base_prompt, detail_labels, background_description="", product_dimensions=""):
     """
     Build an indexed labeled prompt for studio product photography.
     
@@ -394,7 +436,11 @@ def build_labeled_prompt(base_prompt, detail_labels, background_description=""):
     lines.append("")
     
     lines.append("2. SCALE AND PROPORTION - CRITICAL")
-    lines.append("   - First, estimate the real-world size of the product from the reference image")
+    if product_dimensions:
+        lines.append(f"   - PRODUCT DIMENSIONS: {product_dimensions}")
+        lines.append("   - Use these exact dimensions to determine proper scaling")
+    else:
+        lines.append("   - First, estimate the real-world size of the product from the reference image")
     lines.append("   - Scale the background texture/pattern to REAL-WORLD SIZE relative to the product")
     lines.append("   - If the background description includes material scale info, use it to calculate proper scaling")
     lines.append("   - If background pattern is smaller than product, TILE/REPEAT it seamlessly to fill the frame")
@@ -457,6 +503,7 @@ def generate_studio_image_v2():
     lighting_prompt = request.form.get('lightingPrompt', '')
     background_description = request.form.get('backgroundDescription', '')
     material_scale = request.form.get('materialScale', '')
+    product_dimensions = request.form.get('productDimensions', '')
     
     # Background image - this time we USE it
     background_image = None
@@ -470,6 +517,8 @@ def generate_studio_image_v2():
     
     if material_scale:
         print(f"--- V2: Material scale: {material_scale} ---")
+    if product_dimensions:
+        print(f"--- V2: Product dimensions: {product_dimensions} ---")
     
     # Get detail images
     detail_images = []
@@ -578,7 +627,7 @@ CRITICAL: Reproduce EVERYTHING in the image exactly. Every mark, every line, eve
         for detail_bytes, detail_mime in detail_images:
             stage2_parts.append(types.Part.from_bytes(data=detail_bytes, mime_type=detail_mime))
         
-        stage2_prompt = build_stage2_add_product_prompt(prompt, detail_labels, lighting_prompt, material_scale)
+        stage2_prompt = build_stage2_add_product_prompt(prompt, detail_labels, lighting_prompt, material_scale, product_dimensions)
         stage2_parts.append(stage2_prompt)
         
         for attempt in range(max_retries):
@@ -656,7 +705,7 @@ def generate_studio_image_v1_internal(main_bytes, main_mime, prompt, quality, de
     return jsonify({"error": "Generation failed"}), 500
 
 
-def build_stage2_add_product_prompt(base_prompt, detail_labels, lighting_prompt, material_scale=""):
+def build_stage2_add_product_prompt(base_prompt, detail_labels, lighting_prompt, material_scale="", product_dimensions=""):
     """Stage 2: Add product onto the reproduced background."""
     lines = []
     
@@ -686,7 +735,11 @@ def build_stage2_add_product_prompt(base_prompt, detail_labels, lighting_prompt,
         lines.append("")
     
     lines.append("SCALE AND PROPORTION - CRITICAL:")
-    lines.append("- First, estimate the real-world size of the product from the reference image")
+    if product_dimensions:
+        lines.append(f"- PRODUCT DIMENSIONS: {product_dimensions}")
+        lines.append("- Use these exact dimensions to determine proper scaling")
+    else:
+        lines.append("- First, estimate the real-world size of the product from the reference image")
     if material_scale:
         lines.append(f"- BACKGROUND MATERIAL SCALE: {material_scale}")
         lines.append("- Use this scale information to properly size the background relative to the product")
