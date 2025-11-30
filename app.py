@@ -133,7 +133,7 @@ Output ONLY the label. No quotes, no introductory phrases."""
 
 @app.route('/analyze-background', methods=['POST'])
 def analyze_background():
-    """Analyze a background image and return name, description, and whether it has branding/text."""
+    """Analyze a background image and return name, description, branding flag, and material scale."""
     if 'image' not in request.files:
         return jsonify({"error": "No image file provided"}), 400
     
@@ -142,16 +142,14 @@ def analyze_background():
     prompt = """
     Analyze this image in EXTREME detail for exact reproduction in AI image generation.
     
-    Your goal: Describe EVERYTHING in this image so it can be reproduced EXACTLY.
-    
-    Provide THREE things:
+    Provide FOUR things:
     
     1. NAME: A descriptive 2-4 word name (e.g., "Lined Paper Notes", "Red Brick Wall", "Branded Wood Surface")
     
     2. DESCRIPTION: A comprehensive description (100-150 words) of EVERYTHING visible:
     
     === MATERIAL/SURFACE ===
-    - What is the base material? (paper, brick, wood, etc.)
+    - What is the base material? (paper, brick, wood, fabric, etc.)
     - Colors, textures, patterns
     - Surface finish and condition
     
@@ -174,10 +172,19 @@ def analyze_background():
        - Handwriting, signatures, or stamps
        Set to FALSE if this is just a plain material/texture (wood, concrete, fabric, paper without writing, plain surfaces)
     
+    4. MATERIAL_SCALE: Describe the real-world physical size of the repeating pattern or texture unit. Be specific with measurements. Examples:
+       - "Lined paper with horizontal lines spaced approximately 0.3 inches (8mm) apart"
+       - "Red brick with each brick approximately 8 inches wide by 3 inches tall"
+       - "Wood planks approximately 4 inches wide with grain lines every 0.5-1 inch"
+       - "Graph paper with 0.25 inch grid squares"
+       - "Woven fabric with visible threads approximately 1mm apart"
+       - "Concrete with aggregate stones approximately 0.25-0.5 inches in diameter"
+       If no clear repeating pattern, describe the overall material dimensions visible in the image.
+    
     CRITICAL: Capture EVERY detail. If there is handwriting, describe what it says. If there are logos, describe them. Nothing should be omitted.
     
     Output as JSON:
-    {"name": "Short Name", "description": "Complete detailed description...", "has_branding": true/false}
+    {"name": "Short Name", "description": "Complete detailed description...", "has_branding": true/false, "material_scale": "Physical size description..."}
     """
     
     try:
@@ -195,6 +202,7 @@ def analyze_background():
         name = result.get("name", "Custom Background")
         description = result.get("description", name)
         has_branding = result.get("has_branding", False)
+        material_scale = result.get("material_scale", "")
         
         # Clean up name if too long
         words = name.split()
@@ -204,8 +212,14 @@ def analyze_background():
         print(f"--- Background analyzed: {name} ---")
         print(f"--- Description length: {len(description)} chars ---")
         print(f"--- Has branding/text: {has_branding} ---")
+        print(f"--- Material scale: {material_scale} ---")
         
-        return jsonify({"name": name, "description": description, "has_branding": has_branding})
+        return jsonify({
+            "name": name, 
+            "description": description, 
+            "has_branding": has_branding,
+            "material_scale": material_scale
+        })
     except Exception as e:
         print(f"!!!!!!!!!!!!!! BACKGROUND ANALYSIS ERROR: {e}")
         return jsonify({"error": str(e)}), 500
@@ -381,15 +395,12 @@ def build_labeled_prompt(base_prompt, detail_labels, background_description=""):
     
     lines.append("2. SCALE AND PROPORTION - CRITICAL")
     lines.append("   - First, estimate the real-world size of the product from the reference image")
-    lines.append("   - Scale the background texture/pattern to match real-world proportions for that product size")
-    lines.append("   - Examples:")
-    lines.append("     * 4-inch tall bottle on wood: wood grain lines spaced as they appear next to a 4-inch object")
-    lines.append("     * 1.5-inch watch on fabric: fabric weave should be fine/small relative to watch face")
-    lines.append("     * 12-inch shoe on concrete: concrete texture appropriately scaled for a foot-long object")
-    lines.append("   - DO NOT make background textures too large (zoomed in) or too small relative to product")
-    lines.append("   - The background should look like a real surface the product is actually sitting on")
-    lines.append("   - Generate/extend background material as needed to fill the frame properly")
-    lines.append("   - Product should occupy roughly 40-60% of frame width, with background visible all around")
+    lines.append("   - Scale the background texture/pattern to REAL-WORLD SIZE relative to the product")
+    lines.append("   - If the background description includes material scale info, use it to calculate proper scaling")
+    lines.append("   - If background pattern is smaller than product, TILE/REPEAT it seamlessly to fill the frame")
+    lines.append("   - Tiled patterns must look natural and continuous with no visible seams")
+    lines.append("   - Product should occupy 40-60% of frame with properly-scaled background all around")
+    lines.append("   - Result must look like product is actually sitting on that real surface at true scale")
     lines.append("")
     
     lines.append("3. UNIFIED LIGHTING")
@@ -445,6 +456,7 @@ def generate_studio_image_v2():
     quality = request.form.get('quality', '1K')
     lighting_prompt = request.form.get('lightingPrompt', '')
     background_description = request.form.get('backgroundDescription', '')
+    material_scale = request.form.get('materialScale', '')
     
     # Background image - this time we USE it
     background_image = None
@@ -455,6 +467,9 @@ def generate_studio_image_v2():
         background_image = bg_file.read()
         background_mime = bg_file.content_type
         print(f"--- V2: Background image received: {len(background_image)} bytes ---")
+    
+    if material_scale:
+        print(f"--- V2: Material scale: {material_scale} ---")
     
     # Get detail images
     detail_images = []
@@ -563,7 +578,7 @@ CRITICAL: Reproduce EVERYTHING in the image exactly. Every mark, every line, eve
         for detail_bytes, detail_mime in detail_images:
             stage2_parts.append(types.Part.from_bytes(data=detail_bytes, mime_type=detail_mime))
         
-        stage2_prompt = build_stage2_add_product_prompt(prompt, detail_labels, lighting_prompt)
+        stage2_prompt = build_stage2_add_product_prompt(prompt, detail_labels, lighting_prompt, material_scale)
         stage2_parts.append(stage2_prompt)
         
         for attempt in range(max_retries):
@@ -641,7 +656,7 @@ def generate_studio_image_v1_internal(main_bytes, main_mime, prompt, quality, de
     return jsonify({"error": "Generation failed"}), 500
 
 
-def build_stage2_add_product_prompt(base_prompt, detail_labels, lighting_prompt):
+def build_stage2_add_product_prompt(base_prompt, detail_labels, lighting_prompt, material_scale=""):
     """Stage 2: Add product onto the reproduced background."""
     lines = []
     
@@ -671,11 +686,15 @@ def build_stage2_add_product_prompt(base_prompt, detail_labels, lighting_prompt)
         lines.append("")
     
     lines.append("SCALE AND PROPORTION - CRITICAL:")
-    lines.append("- Estimate the real-world size of the product (e.g., watch ~1.5 inches, shoe ~12 inches, bottle ~8 inches)")
-    lines.append("- Scale the background texture to match real-world proportions for that product size")
-    lines.append("- If background texture appears too large or zoomed-in relative to product, generate it at proper scale")
-    lines.append("- The background should look like a real surface the product would actually sit on")
-    lines.append("- Product should occupy 40-60% of frame width with background extending beyond on all sides")
+    lines.append("- First, estimate the real-world size of the product from the reference image")
+    if material_scale:
+        lines.append(f"- BACKGROUND MATERIAL SCALE: {material_scale}")
+        lines.append("- Use this scale information to properly size the background relative to the product")
+        lines.append("- Calculate how many repeats of the pattern would realistically fit based on product vs material size")
+    lines.append("- If background pattern is smaller than product, TILE/REPEAT it seamlessly to fill the frame")
+    lines.append("- Tiled patterns must look natural and continuous with no visible seams")
+    lines.append("- Product should occupy 40-60% of frame with properly-scaled background all around")
+    lines.append("- The result must look like the product is ACTUALLY sitting on that real surface at TRUE SCALE")
     lines.append("")
     lines.append("CRITICAL REQUIREMENTS:")
     lines.append("- DO NOT modify the product - reproduce it exactly from Image 2")
@@ -683,7 +702,7 @@ def build_stage2_add_product_prompt(base_prompt, detail_labels, lighting_prompt)
     lines.append("- Unified lighting across both elements")
     lines.append("- NO lighting equipment, windows, or studio gear visible in image")
     lines.append("")
-    lines.append("OUTPUT: A photograph of the exact product on a properly-scaled background surface.")
+    lines.append("OUTPUT: A photograph of the exact product on a properly-scaled, seamlessly tiled background surface.")
     
     return "\n".join(lines)
 
