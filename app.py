@@ -140,59 +140,37 @@ def analyze_background():
     file = request.files['image']
     
     prompt = """
-    Analyze this surface/material image in EXTREME detail for reproducible AI image generation.
+    Analyze this image in EXTREME detail for exact reproduction in AI image generation.
     
-    Your goal: Create a description so detailed and specific that an AI could generate this EXACT surface repeatedly with high consistency.
+    Your goal: Describe EVERYTHING in this image so it can be reproduced EXACTLY.
     
     Provide TWO things:
     
-    1. NAME: A descriptive 2-4 word name (e.g., "Weathered Red Brick", "Dark Walnut Planks", "Polished Carrara Marble")
+    1. NAME: A descriptive 2-4 word name (e.g., "Lined Paper Notes", "Red Brick Wall", "Branded Wood Surface")
     
-    2. DESCRIPTION: A comprehensive specification (100-150 words) covering ALL of these aspects:
+    2. DESCRIPTION: A comprehensive description (100-150 words) of EVERYTHING visible:
     
-    === MATERIAL IDENTIFICATION ===
-    - Exact material type (e.g., "reclaimed pine wood planks", "handmade clay bricks", "honed granite slab")
-    - Material origin/style if apparent (e.g., "industrial", "rustic farmhouse", "modern minimalist")
+    === MATERIAL/SURFACE ===
+    - What is the base material? (paper, brick, wood, etc.)
+    - Colors, textures, patterns
+    - Surface finish and condition
     
-    === PRECISE COLOR SPECIFICATION ===
-    - Primary/dominant color with SPECIFIC descriptors (e.g., "warm terracotta red with burnt orange undertones and occasional charcoal-gray fire marks" NOT just "red")
-    - Secondary colors (list each with specific descriptors)
-    - Color temperature (warm, cool, neutral)
-    - Color saturation level (muted/desaturated, vibrant, rich)
-    - Any color gradients, variations, or mottling patterns
+    === CONTENT ON THE SURFACE ===
+    - Any text, writing, or words - describe EXACTLY what they say
+    - Any drawings, sketches, or diagrams
+    - Any logos, stamps, or branding
+    - Any stains, marks, or intentional markings
+    - Position/layout of all elements
     
-    === TEXTURE CHARACTERISTICS ===
-    - Surface roughness (mirror smooth, satin, slightly textured, rough, heavily textured, coarse)
-    - Texture type (wood grain, stone pitting, fabric weave, brushed, hammered, sandblasted)
-    - Texture depth and scale (fine hairline scratches, deep grooves, subtle undulations)
-    - Directional texture (horizontal grain, vertical striations, random, radial)
+    === LIGHTING & ATMOSPHERE ===
+    - How is it lit?
+    - Any shadows or highlights?
+    - Overall mood/feel
     
-    === PATTERN DETAILS ===
-    - Pattern type (linear planks, rectangular bricks, hexagonal tiles, organic veining, random aggregate)
-    - Element sizes and proportions (e.g., "4-inch wide planks", "standard brick format 2:1 ratio")
-    - Spacing/gaps/joints (tight seams, visible grout lines, natural gaps)
-    - Pattern regularity (uniform grid, staggered/offset, deliberately random)
-    
-    === SURFACE FINISH & LIGHT BEHAVIOR ===
-    - Reflectivity level (matte/flat, eggshell, satin, semi-gloss, high-gloss, mirror)
-    - How highlights appear (soft diffused, sharp specular, none)
-    - Shadow behavior in texture (deep shadows in grooves, subtle shading, minimal shadow)
-    
-    === AGING & CHARACTER ===
-    - Wear indicators (pristine, light wear, moderately distressed, heavily weathered, antique)
-    - Specific wear patterns (rounded edges, faded areas, stains, chips, cracks)
-    - Patina or finish changes over time
-    - Any grout, mortar, filler (color, width, condition)
-    
-    === VISIBLE TEXT/MARKINGS (if any) ===
-    - If there is ANY visible text, words, letters, numbers, logos, stamps, or printed markings on the surface, record them EXACTLY as they appear
-    - Include location and style of text (e.g., "faint stamped 'MADE IN USA' in corner", "newspaper headlines visible")
-    - If no text is present, omit this section
-    
-    Be EXTREMELY specific. Instead of "brown wood", say "medium-toned American walnut with prominent dark chocolate grain lines, honey-gold highlights between grain, and a hand-rubbed oil finish giving soft satin sheen."
+    CRITICAL: Capture EVERY detail. If there is handwriting, describe what it says. If there are logos, describe them. Nothing should be omitted.
     
     Output as JSON:
-    {"name": "Short Name", "description": "Extremely detailed reproducible description..."}
+    {"name": "Short Name", "description": "Complete detailed description of everything visible..."}
     """
     
     try:
@@ -423,13 +401,13 @@ def build_labeled_prompt(base_prompt, detail_labels, background_description=""):
 @app.route('/generate-studio-image-v2', methods=['POST'])
 def generate_studio_image_v2():
     """
-    Two-stage studio image generation for better background integration.
+    Two-stage generation - Background-first approach.
     
-    Stage 1: Place product on background with soft, neutral lighting
-             Focus on perfect integration and material matching
+    The insight: Products reproduce well because they're the primary focus.
+    So let's make the background the primary focus first, then add the product.
     
-    Stage 2: Re-light the composed image with user's selected lighting scheme
-             Focus only on lighting transformation
+    Stage 1: Reproduce the background EXACTLY (like a product photo of the surface)
+    Stage 2: Add the product onto that reproduced background
     """
     if 'image' not in request.files:
         return jsonify({"error": "No reference image provided"}), 400
@@ -437,20 +415,20 @@ def generate_studio_image_v2():
     main_file = request.files['image']
     prompt = request.form.get('prompt', 'Turn this into a studio photograph.')
     quality = request.form.get('quality', '1K')
-    lighting_prompt = request.form.get('lightingPrompt', '')  # User's lighting selection
+    lighting_prompt = request.form.get('lightingPrompt', '')
+    background_description = request.form.get('backgroundDescription', '')
     
-    # Background image is now sent again for v2
+    # Background image - this time we USE it
     background_image = None
     background_mime = None
-    background_description = request.form.get('backgroundDescription', '')
     
     if 'backgroundImage' in request.files:
         bg_file = request.files['backgroundImage']
         background_image = bg_file.read()
         background_mime = bg_file.content_type
-        print(f"--- V2: Background reference image received: {len(background_image)} bytes ---")
+        print(f"--- V2: Background image received: {len(background_image)} bytes ---")
     
-    # Get detail images (up to 3)
+    # Get detail images
     detail_images = []
     detail_labels = []
     
@@ -471,35 +449,43 @@ def generate_studio_image_v2():
     
     try:
         main_image_bytes = main_file.read()
-        print(f"--- V2 Two-Stage Generation: {quality} ---")
-        print(f"--- Stage 1: Soft lighting integration ---")
+        
+        if not background_image:
+            # No background image - fall back to V1 behavior
+            print("--- V2: No background image, using V1 path ---")
+            return generate_studio_image_v1_internal(
+                main_image_bytes, main_file.content_type,
+                prompt, quality, detail_images, detail_labels, background_description
+            )
+        
+        print(f"--- V2 Background-First Generation: {quality} ---")
         
         # ==========================================
-        # STAGE 1: Integration with soft neutral lighting
+        # STAGE 1: Reproduce background EXACTLY
         # ==========================================
+        print("--- Stage 1: Reproducing background exactly ---")
+        
         stage1_parts = []
+        # Background image is THE ONLY image - treat it like a product
+        stage1_parts.append(types.Part.from_bytes(data=background_image, mime_type=background_mime))
         
-        # Image 1: Product reference
-        stage1_parts.append(types.Part.from_bytes(data=main_image_bytes, mime_type=main_file.content_type))
+        stage1_prompt = """Recreate this image EXACTLY as a studio photograph.
+
+IMAGE 1: Reference image to reproduce with PERFECT FIDELITY.
+
+TASK: Create an EXACT reproduction of this image.
+- Copy EVERY detail precisely: colors, textures, patterns, text, markings, logos, writing
+- This is not inspiration - reproduce it EXACTLY as shown
+- Match the exact colors, lighting, and contrast
+- If there is text or writing, reproduce it EXACTLY as it appears
+- If there are logos or branding, reproduce them EXACTLY
+
+OUTPUT: A perfect reproduction of the reference image, as if photographed in a studio with clean, even lighting.
+
+CRITICAL: Reproduce EVERYTHING in the image exactly. Every mark, every line, every detail."""
         
-        # Image 2: Background reference (if provided)
-        if background_image:
-            stage1_parts.append(types.Part.from_bytes(data=background_image, mime_type=background_mime))
-        
-        # Add detail images
-        for detail_bytes, detail_mime in detail_images:
-            stage1_parts.append(types.Part.from_bytes(data=detail_bytes, mime_type=detail_mime))
-        
-        # Build Stage 1 prompt - focus on integration, soft lighting
-        stage1_prompt = build_stage1_prompt(
-            prompt, 
-            detail_labels, 
-            has_background_image=background_image is not None,
-            background_description=background_description
-        )
         stage1_parts.append(stage1_prompt)
         
-        # Generate Stage 1
         stage1_image = None
         max_retries = 3
         
@@ -521,7 +507,7 @@ def generate_studio_image_v2():
                     for part in response.candidates[0].content.parts:
                         if part.inline_data:
                             stage1_image = part.inline_data.data
-                            print(f"--- Stage 1 complete on attempt {attempt + 1}. Size: {len(stage1_image)} bytes ---")
+                            print(f"--- Stage 1 (background) complete. Size: {len(stage1_image)} bytes ---")
                             break
                 
                 if stage1_image:
@@ -532,23 +518,26 @@ def generate_studio_image_v2():
                 continue
         
         if not stage1_image:
-            return jsonify({"error": "Stage 1 failed - could not generate base image"}), 500
+            return jsonify({"error": "Stage 1 failed - could not reproduce background"}), 500
         
         # ==========================================
-        # STAGE 2: Apply user's lighting scheme
+        # STAGE 2: Add product onto the background
         # ==========================================
-        print(f"--- Stage 2: Applying lighting: {lighting_prompt[:50] if lighting_prompt else 'default'}... ---")
+        print("--- Stage 2: Adding product to background ---")
         
         stage2_parts = []
-        
-        # Image 1: Stage 1 output (the composed image)
+        # Image 1: The reproduced background
         stage2_parts.append(types.Part.from_bytes(data=stage1_image, mime_type="image/png"))
+        # Image 2: The product to add
+        stage2_parts.append(types.Part.from_bytes(data=main_image_bytes, mime_type=main_file.content_type))
         
-        # Build Stage 2 prompt - focus only on lighting transformation
-        stage2_prompt = build_stage2_prompt(lighting_prompt)
+        # Add detail images
+        for detail_bytes, detail_mime in detail_images:
+            stage2_parts.append(types.Part.from_bytes(data=detail_bytes, mime_type=detail_mime))
+        
+        stage2_prompt = build_stage2_add_product_prompt(prompt, detail_labels, lighting_prompt)
         stage2_parts.append(stage2_prompt)
         
-        # Generate Stage 2
         for attempt in range(max_retries):
             try:
                 response = client.models.generate_content(
@@ -567,22 +556,20 @@ def generate_studio_image_v2():
                     for part in response.candidates[0].content.parts:
                         if part.inline_data:
                             final_image_b64 = base64.b64encode(part.inline_data.data).decode('utf-8')
-                            print(f"--- Stage 2 complete on attempt {attempt + 1}. Final size: {len(part.inline_data.data)} bytes ---")
+                            print(f"--- Stage 2 (add product) complete. Final size: {len(part.inline_data.data)} bytes ---")
                             return jsonify({
                                 "message": "Two-stage image generated successfully",
                                 "image": final_image_b64
                             })
                 
-                print(f"--- Stage 2 attempt {attempt + 1}: No image in response ---")
-                
             except Exception as e:
                 print(f"--- Stage 2 attempt {attempt + 1} failed: {e} ---")
                 continue
         
-        # Stage 2 failed - return Stage 1 result as fallback
-        print("--- Stage 2 failed, returning Stage 1 result ---")
+        # Stage 2 failed - return Stage 1 (just the background)
+        print("--- Stage 2 failed, returning background only ---")
         return jsonify({
-            "message": "Partial success - lighting adjustment failed",
+            "message": "Partial success - could not add product",
             "image": base64.b64encode(stage1_image).decode('utf-8')
         })
 
@@ -591,100 +578,78 @@ def generate_studio_image_v2():
         return jsonify({"error": str(e)}), 500
 
 
-def build_stage1_prompt(base_prompt, detail_labels, has_background_image=False, background_description=""):
-    """
-    New approach: Treat product and background as TWO objects to faithfully recreate,
-    then blend them into one photograph using Google's recommended "blend" language.
-    """
-    lines = []
+def generate_studio_image_v1_internal(main_bytes, main_mime, prompt, quality, detail_images, detail_labels, bg_desc):
+    """Internal V1 generation for fallback."""
+    content_parts = []
+    content_parts.append(types.Part.from_bytes(data=main_bytes, mime_type=main_mime))
     
-    if has_background_image:
-        # Use Google's recommended indexed + blend approach
-        lines.append("You are given TWO reference images to blend into ONE photograph:")
-        lines.append("")
-        lines.append("Image 1: THE PRODUCT")
-        lines.append("- A product/object to be photographed")
-        lines.append("- Recreate this object EXACTLY as shown - same shape, proportions, colors, materials, every detail")
-        lines.append("")
-        lines.append("Image 2: THE SURFACE")
-        lines.append("- A flat surface/material")
-        lines.append("- Recreate this surface EXACTLY as shown - same material, colors, texture, pattern, every detail")
-        lines.append("")
-        
-        for i, label in enumerate(detail_labels):
-            lines.append(f"Image {i + 3}: Detail reference for '{label}'")
-        if detail_labels:
-            lines.append("")
-        
-        lines.append("=" * 50)
-        lines.append("TASK: BLEND Image 1 and Image 2 into ONE studio photograph")
-        lines.append("=" * 50)
-        lines.append("")
-        lines.append("Create a photograph where:")
-        lines.append("- The product from Image 1 sits on the surface from Image 2")
-        lines.append("- KEEP: The exact product from Image 1 (perfectly recreated)")
-        lines.append("- KEEP: The exact surface from Image 2 (perfectly recreated)")  
-        lines.append("- The surface acts as a flat studio backdrop filling the frame")
-        lines.append("")
-        lines.append(base_prompt)
-        lines.append("")
-        
-        if background_description:
-            lines.append(f"Surface material details: {background_description}")
-            lines.append("")
-        
-        lines.append("COMPOSITION:")
-        lines.append("- Product placed centrally on the surface")
-        lines.append("- Surface extends to fill entire background (like seamless studio paper)")
-        lines.append("- Natural contact shadow where product meets surface")
-        lines.append("- Both elements lit by the same light source")
-        lines.append("")
-        
-        lines.append("LIGHTING:")
-        lines.append("- Soft, even, diffused studio lighting")
-        lines.append("- Light falls naturally on both product AND surface")
-        lines.append("- Consistent shadows and highlights across both")
-        lines.append("")
-        
-        lines.append("OUTPUT: One cohesive photograph that looks like the product was actually photographed on that surface.")
-        
-    else:
-        # No background image - simpler prompt
-        lines.append("IMAGE REFERENCES:")
-        lines.append("Image 1: Product to recreate exactly")
-        for i, label in enumerate(detail_labels):
-            lines.append(f"Image {i + 2}: Detail reference - '{label}'")
-        lines.append("")
-        lines.append(base_prompt)
-        lines.append("")
-        lines.append("Recreate the exact product from Image 1 in a professional studio setting.")
+    for detail_bytes, detail_mime in detail_images:
+        content_parts.append(types.Part.from_bytes(data=detail_bytes, mime_type=detail_mime))
     
-    return "\n".join(lines)
+    labeled_prompt = build_labeled_prompt(prompt, detail_labels, bg_desc)
+    content_parts.append(labeled_prompt)
+    
+    for attempt in range(3):
+        try:
+            response = client.models.generate_content(
+                model=IMAGE_GEN_MODEL,
+                contents=content_parts,
+                config=types.GenerateContentConfig(
+                    response_modalities=["TEXT", "IMAGE"],
+                    image_config=types.ImageConfig(aspect_ratio="1:1", image_size=quality)
+                )
+            )
+            
+            if response.candidates and response.candidates[0].content.parts:
+                for part in response.candidates[0].content.parts:
+                    if part.inline_data:
+                        return jsonify({
+                            "message": "Image generated successfully",
+                            "image": base64.b64encode(part.inline_data.data).decode('utf-8')
+                        })
+        except Exception as e:
+            continue
+    
+    return jsonify({"error": "Generation failed"}), 500
 
 
-def build_stage2_prompt(lighting_prompt):
-    """
-    Stage 2 prompt: Subtle lighting adjustment.
-    Research shows incremental edits work better than sweeping changes.
-    """
+def build_stage2_add_product_prompt(base_prompt, detail_labels, lighting_prompt):
+    """Stage 2: Add product onto the reproduced background."""
     lines = []
     
-    lines.append("Take this photograph and adjust the lighting slightly.")
+    lines.append("You have TWO reference images:")
     lines.append("")
-    lines.append("KEEP EVERYTHING THE SAME:")
-    lines.append("- Same product, same position, same surface, same composition")
-    lines.append("- Do not regenerate or redraw anything")
-    lines.append("- Only adjust how the existing light falls")
+    lines.append("Image 1: BACKGROUND - A studio backdrop. Keep this EXACTLY as is.")
+    lines.append("Image 2: PRODUCT - An object to place on the background. Reproduce this EXACTLY.")
+    
+    for i, label in enumerate(detail_labels):
+        lines.append(f"Image {i + 3}: Detail reference for product - '{label}'")
+    
     lines.append("")
-    lines.append("LIGHTING ADJUSTMENT:")
+    lines.append("=" * 50)
+    lines.append("TASK: Place the product onto the background")
+    lines.append("=" * 50)
+    lines.append("")
+    lines.append("Create a photograph where:")
+    lines.append("- The background (Image 1) remains EXACTLY as shown - every detail, text, marking preserved")
+    lines.append("- The product (Image 2) is reproduced EXACTLY and placed on/against the background")
+    lines.append("- The product sits naturally with appropriate shadow and lighting")
+    lines.append("")
+    lines.append(base_prompt)
+    lines.append("")
     
     if lighting_prompt:
+        lines.append("LIGHTING:")
         lines.append(lighting_prompt)
-    else:
-        lines.append("Professional three-point studio lighting")
+        lines.append("")
     
+    lines.append("CRITICAL REQUIREMENTS:")
+    lines.append("- DO NOT modify, blur, or simplify the background - keep it pixel-perfect")
+    lines.append("- DO NOT modify the product - reproduce it exactly from Image 2")
+    lines.append("- Add natural contact shadow where product meets surface")
+    lines.append("- Unified lighting across both elements")
     lines.append("")
-    lines.append("This is a subtle lighting adjustment, not a complete re-render.")
+    lines.append("OUTPUT: A photograph of the exact product on the exact background.")
     
     return "\n".join(lines)
 
