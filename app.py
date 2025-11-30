@@ -91,26 +91,21 @@ def analyze_detail():
 
 @app.route('/analyze-background', methods=['POST'])
 def analyze_background():
-    """Analyze a background image and return a short descriptive name."""
+    """Analyze a background image and return both a short name and detailed description."""
     if 'image' not in request.files:
         return jsonify({"error": "No image file provided"}), 400
     
     file = request.files['image']
     
     prompt = """
-    Look at this image and identify what type of background or surface it shows.
-    Generate a SHORT name (2-4 words max) that describes this background.
+    Look at this image and analyze the background/surface shown.
     
-    Examples of good names:
-    - "Red Brick Wall"
-    - "Rustic Wood"
-    - "White Marble"
-    - "Concrete Floor"
-    - "Green Velvet"
-    - "Sandy Beach"
-    - "Dark Slate"
+    Provide TWO things:
+    1. NAME: A short 2-4 word name for this background (e.g., "Red Brick Wall", "Rustic Oak Wood", "White Marble")
+    2. DESCRIPTION: A detailed description (20-40 words) of the material, texture, color, and characteristics that would help recreate this as a studio backdrop. Focus on: material type, color tones, texture, patterns, weathering, finish.
     
-    Output ONLY the short name. No quotes, no explanation, no punctuation.
+    Output as JSON:
+    {"name": "Short Name", "description": "Detailed description..."}
     """
     
     try:
@@ -118,17 +113,22 @@ def analyze_background():
         
         response = client.models.generate_content(
             model=ANALYSIS_MODEL,
-            contents=[types.Part.from_bytes(data=image_bytes, mime_type=file.content_type), prompt]
+            contents=[types.Part.from_bytes(data=image_bytes, mime_type=file.content_type), prompt],
+            config=types.GenerateContentConfig(response_mime_type="application/json")
         )
         
-        # Clean the response
-        name = response.text.strip().strip('"\'').rstrip('.')
-        # Ensure it's not too long
+        result = json.loads(clean_json_text(response.text))
+        
+        # Ensure we have both fields
+        name = result.get("name", "Custom Background")
+        description = result.get("description", name)
+        
+        # Clean up name if too long
         words = name.split()
         if len(words) > 4:
             name = ' '.join(words[:4])
         
-        return jsonify({"name": name})
+        return jsonify({"name": name, "description": description})
     except Exception as e:
         print(f"!!!!!!!!!!!!!! BACKGROUND ANALYSIS ERROR: {e}")
         return jsonify({"error": str(e)}), 500
@@ -278,7 +278,7 @@ def build_labeled_prompt(base_prompt, detail_labels, has_background=False):
     
     # Label background image if present
     if has_background:
-        lines.append(f"- Image {next_idx}: Background/environment reference (recreate this surface/environment as the setting for the product)")
+        lines.append(f"- Image {next_idx}: Background/surface reference (use this as visual reference for the background material, texture, color, and pattern)")
         next_idx += 1
     
     # Label detail images
@@ -291,21 +291,21 @@ def build_labeled_prompt(base_prompt, detail_labels, has_background=False):
     lines.append("INSTRUCTIONS:")
     lines.append(base_prompt)
     
-    # Add preservation language per best practices
+    # Add integration instructions
     lines.append("")
     if has_background:
-        lines.append("CRITICAL BACKGROUND & LIGHTING INTEGRATION:")
-        lines.append("1. Place the product WITHIN the environment from Image 2 - it should look like it was actually photographed there")
-        lines.append("2. Match the ambient lighting of the background environment - if the background has warm tones, the product should have warm light hitting it")
-        lines.append("3. Add realistic CONTACT SHADOWS where the product meets the surface - soft diffused shadows that anchor the object to the background")
-        lines.append("4. Add subtle REFLECTED COLOR from the background onto the product edges (color spill/bounce light)")
-        lines.append("5. Match the depth of field and focus characteristics between product and background")
-        lines.append("6. If the background has texture (brick, wood, fabric), ensure the lighting reveals that texture naturally")
-        lines.append("7. The final image should look like a single photograph, not a composite")
+        lines.append("CRITICAL - CREATING A COHESIVE STUDIO PHOTOGRAPH:")
+        lines.append("1. Generate a SEAMLESS studio backdrop using the material/surface shown in Image 2 as reference")
+        lines.append("2. The backdrop should be a proper studio surface (like a sweep or infinity cove) made of this material - NOT a wall behind the product")
+        lines.append("3. Light BOTH the product AND backdrop with the same studio lighting setup")
+        lines.append("4. Create natural CONTACT SHADOWS where the product meets the surface")
+        lines.append("5. Add subtle REFLECTED LIGHT from the backdrop onto the product (color spill)")
+        lines.append("6. Match depth of field - both product and nearby backdrop should be in focus")
+        lines.append("7. The final image must look like a SINGLE photograph taken in a studio, not a composite")
         lines.append("")
     lines.append("Preserve the exact object from Image 1.")
     if detail_labels:
-        lines.append("Use the detail reference images to ensure accurate rendering of specific areas, textures, and fine details that may not be fully visible in the main reference.")
+        lines.append("Use the detail reference images to ensure accurate rendering of textures and fine details.")
     
     return "\n".join(lines)
 
