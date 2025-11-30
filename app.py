@@ -557,16 +557,15 @@ def generate_studio_image_v2():
         print(f"--- V2 Background-First Generation: {quality} ---")
         
         # ==========================================
-        # STAGE 1: Generate background
+        # STAGE 1: Reproduce background EXACTLY
+        # V2 is only called for backgrounds with branding/text to preserve
         # ==========================================
+        print("--- Stage 1: Reproducing background EXACTLY (preserving branding/text) ---")
         
         stage1_parts = []
         stage1_parts.append(types.Part.from_bytes(data=background_image, mime_type=background_mime))
         
-        if has_branding:
-            # EXACT reproduction - preserve text, logos, branding
-            print("--- Stage 1: Reproducing background EXACTLY (has branding) ---")
-            stage1_prompt = """Recreate this image EXACTLY as a studio photograph.
+        stage1_prompt = """Recreate this image EXACTLY as a studio photograph.
 
 IMAGE 1: Reference image to reproduce with PERFECT FIDELITY.
 
@@ -580,34 +579,6 @@ TASK: Create an EXACT reproduction of this image.
 OUTPUT: A perfect reproduction of the reference image, as if photographed in a studio with clean, even lighting.
 
 CRITICAL: Reproduce EVERYTHING in the image exactly. Every mark, every line, every detail."""
-        else:
-            # STYLE REFERENCE - use as inspiration, generate fresh at proper scale
-            print("--- Stage 1: Using background as STYLE REFERENCE (no branding) ---")
-            
-            scale_instruction = ""
-            if material_scale:
-                scale_instruction = f"\n\nMATERIAL SCALE: {material_scale}\nGenerate the material at this real-world scale."
-            if product_dimensions:
-                scale_instruction += f"\n\nThis background will be used with a product of dimensions: {product_dimensions}\nScale the material pattern appropriately - if the pattern is smaller than the product, tile/repeat it seamlessly."
-            
-            stage1_prompt = f"""Use this image as a STYLE REFERENCE to generate a professional studio backdrop.
-
-IMAGE 1: Style reference showing the material, texture, and color to match.
-
-TASK: Generate a NEW studio backdrop surface inspired by this reference.
-- Match the MATERIAL TYPE (wood, fabric, paper, concrete, etc.)
-- Match the COLOR and TONE precisely
-- Match the TEXTURE and SURFACE QUALITY
-- Match the overall MOOD and FEEL
-
-DO NOT reproduce this exact image. Instead, generate a FRESH version of this type of material that:
-- Looks like a professional studio backdrop
-- Has clean, even studio lighting
-- Extends seamlessly to fill the frame
-- Has realistic material texture at proper scale
-- Could be tiled/repeated if needed{scale_instruction}
-
-OUTPUT: A professional studio backdrop surface that matches the style, material, and color of the reference, but generated fresh with proper scaling for product photography."""
         
         stage1_parts.append(stage1_prompt)
         
