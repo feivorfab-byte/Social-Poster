@@ -675,6 +675,63 @@ def health():
     })
 
 
+# MARK: - Testing Endpoints
+
+@app.route('/preview-prompt', methods=['POST'])
+def preview_prompt():
+    """
+    Preview the prompt that would be generated WITHOUT actually generating.
+    Use this for testing prompt construction across all lighting/orientation combos.
+    Cost: $0 (no AI calls)
+    """
+    gen_req = GenerationRequest(request)
+    
+    has_master = gen_req.master_image is not None
+    has_cached_bg = gen_req.cached_background is not None
+    
+    prompt = build_generation_prompt(gen_req, has_master, has_cached_bg)
+    
+    return jsonify({
+        "prompt": prompt,
+        "prompt_length": len(prompt),
+        "lighting_scheme_id": gen_req.lighting_scheme_id,
+        "lighting_prompt": gen_req.lighting_prompt[:200] + "..." if len(gen_req.lighting_prompt) > 200 else gen_req.lighting_prompt,
+        "orientation": gen_req.orientation,
+        "background_description": gen_req.background_description[:100] if gen_req.background_description else "",
+        "has_master": has_master,
+        "has_cached_bg": has_cached_bg,
+        "product_dimensions": gen_req.product_dimensions,
+        "visible_text": gen_req.visible_text
+    })
+
+
+@app.route('/test-lighting-schemes', methods=['GET'])
+def test_lighting_schemes():
+    """
+    Test that all lighting schemes are accessible.
+    Returns the prompt text for each scheme.
+    """
+    schemes = ["highkey", "softbox", "product", "butterfly", "natural",
+               "gradient", "rembrandt", "rim", "spotlight", "lowkey"]
+    
+    results = {}
+    for scheme_id in schemes:
+        prompt = get_lighting_scheme(scheme_id)
+        results[scheme_id] = {
+            "found": prompt is not None and len(prompt) > 0,
+            "prompt_preview": prompt[:100] + "..." if prompt and len(prompt) > 100 else prompt,
+            "prompt_length": len(prompt) if prompt else 0
+        }
+    
+    all_found = all(r["found"] for r in results.values())
+    
+    return jsonify({
+        "status": "ok" if all_found else "missing_schemes",
+        "all_schemes_found": all_found,
+        "schemes": results
+    })
+
+
 # MARK: - Analysis Endpoints
 
 @app.route('/analyze-image', methods=['POST'])
