@@ -367,9 +367,19 @@ class GenerationRequest:
                 label = request_obj.form.get(f'detail{i}Label', f'Detail {i}')
                 self.detail_labels.append(label)
         
-        # Get lighting from scheme if not provided directly
-        if not self.lighting_prompt and self.lighting_scheme_id:
-            self.lighting_prompt = get_lighting_scheme(self.lighting_scheme_id)
+        # Get lighting - prefer scheme lookup from database, fall back to prompt text
+        # This ensures we log the correct scheme ID for analytics
+        if self.lighting_scheme_id:
+            scheme_prompt = get_lighting_scheme(self.lighting_scheme_id)
+            if scheme_prompt:
+                self.lighting_prompt = scheme_prompt
+            elif not self.lighting_prompt:
+                # Neither scheme found nor prompt provided - use default
+                self.lighting_prompt = get_lighting_scheme('softbox')
+        elif not self.lighting_prompt:
+            # No scheme ID and no prompt - use default
+            self.lighting_scheme_id = 'softbox'
+            self.lighting_prompt = get_lighting_scheme('softbox')
         
         # Debug logging
         print(f"[REQUEST] orientation={self.orientation}, lighting_scheme={self.lighting_scheme_id}")
