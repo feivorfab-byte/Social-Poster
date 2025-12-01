@@ -241,11 +241,19 @@ def get_prompt(name):
 @lru_cache(maxsize=20)
 def get_lighting_scheme(scheme_id):
     """Get lighting scheme from Supabase or fallback."""
+    print(f"[LIGHTING] Looking up scheme: {scheme_id}")
     if supabase:
-        results = supabase.select('lighting_schemes', 'prompt_text', {'id': scheme_id, 'is_active': 'true'})
+        # Query by ID only (is_active filter handled differently for booleans)
+        results = supabase.select('lighting_schemes', 'id,prompt_text,is_active', {'id': scheme_id})
         if results and len(results) > 0:
-            return results[0].get('prompt_text', '')
-    return FALLBACK_LIGHTING.get(scheme_id, FALLBACK_LIGHTING['softbox'])
+            scheme = results[0]
+            if scheme.get('is_active', True):
+                print(f"[LIGHTING] Found in Supabase: {scheme_id}")
+                return scheme.get('prompt_text', '')
+    
+    fallback = FALLBACK_LIGHTING.get(scheme_id, FALLBACK_LIGHTING['softbox'])
+    print(f"[LIGHTING] Using fallback for: {scheme_id}")
+    return fallback
 
 
 @lru_cache(maxsize=10)
@@ -362,6 +370,10 @@ class GenerationRequest:
         # Get lighting from scheme if not provided directly
         if not self.lighting_prompt and self.lighting_scheme_id:
             self.lighting_prompt = get_lighting_scheme(self.lighting_scheme_id)
+        
+        # Debug logging
+        print(f"[REQUEST] orientation={self.orientation}, lighting_scheme={self.lighting_scheme_id}")
+        print(f"[REQUEST] lighting_prompt_length={len(self.lighting_prompt) if self.lighting_prompt else 0}")
 
 
 def generate_image(content_parts, quality):
